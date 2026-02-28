@@ -1,0 +1,12 @@
+# Virtual environment
+empireTAS/
+
+# Image directories
+src/images/backupImages/
+src/images/trainingBackup/
+src/images/ocr/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
