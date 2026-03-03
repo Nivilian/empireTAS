@@ -3,6 +3,7 @@ import json
 import numpy as np
 from pathlib import Path
 import cv2
+import threading
 try:
     import torch
     import torch.nn as nn
@@ -14,6 +15,7 @@ try:
 except Exception:
     # If torch not installed, the file can still be imported but functionality will raise
     torch = None
+import time
 
 
 IMG_SIZE = 128
@@ -170,6 +172,15 @@ class TorchResourceFieldClassifier:
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.5)
         criterion = nn.CrossEntropyLoss()
 
+        # Diagnostic: print device info
+        try:
+            print(f"[TRAIN] device={self.device}  cuda_available={torch.cuda.is_available()}", flush=True)
+            # sample parameter device
+            p = next(model.parameters())
+            print(f"[TRAIN] model parameters on device: {p.device}", flush=True)
+        except Exception:
+            pass
+
         best_acc = 0.0
         best_path = None
         for epoch in range(1, epochs + 1):
@@ -200,6 +211,23 @@ class TorchResourceFieldClassifier:
 
             # validate
             model.eval()
+            # notify start of validation (batch_idx = 0) for diagnostics
+            if progress_callback:
+                try:
+                    progress_callback(epoch, 0, num_batches, train_loss=train_loss, train_acc=train_acc)
+                except Exception:
+                    pass
+            try:
+                print(f"[TRAIN] epoch {epoch}: starting validation...", flush=True)
+            except Exception:
+                pass
+            # time the validation stage; optionally synchronize CUDA to measure true time
+            t0 = time.time()
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+            except Exception:
+                pass
             vloss = 0.0
             vcorrect = vtotal = 0
             with torch.no_grad():
@@ -214,14 +242,41 @@ class TorchResourceFieldClassifier:
                     vtotal += labels.size(0)
             val_loss = vloss / max(1, vtotal)
             val_acc = vcorrect / max(1, vtotal) if vtotal > 0 else 0.0
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+            except Exception:
+                pass
+            t1 = time.time()
+            try:
+                print(f"[TRAIN] epoch {epoch}: validation time {t1 - t0:.3f}s  val_acc={val_acc:.4f}", flush=True)
+            except Exception:
+                pass
             scheduler.step(val_loss)
 
-            # save best
+            # save best (perform heavy disk I/O asynchronously)
             if save_path and val_acc > best_acc:
                 best_acc = val_acc
                 best_path = save_path
-                # save model state and classes
-                torch.save({'model_state_dict': model.state_dict(), 'classes': classes}, save_path)
+                # prepare CPU state_dict to avoid GPU<->CPU sync overhead in the saver thread
+                # capture a reference to state_dict quickly (avoid heavy .cpu() here)
+                state_ref = model.state_dict()
+
+                def _save_async(path, state_ref_inner, classes_list):
+                    try:
+                        cpu_state_inner = {k: v.cpu() for k, v in state_ref_inner.items()}
+                    except Exception:
+                        cpu_state_inner = {k: v for k, v in state_ref_inner.items()}
+                    try:
+                        torch.save({'model_state_dict': cpu_state_inner, 'classes': classes_list}, path)
+                    except Exception:
+                        try:
+                            torch.save({'model_state_dict': cpu_state_inner}, path)
+                        except Exception:
+                            pass
+
+                t = threading.Thread(target=_save_async, args=(save_path, state_ref, classes), daemon=True)
+                t.start()
                 # report end-of-epoch with validation results
                 if progress_callback:
                     try:
@@ -232,8 +287,24 @@ class TorchResourceFieldClassifier:
         # after training set model and classes
         self.model = model.to(self.device)
         if best_path is None and save_path:
-            # save final
-            torch.save({'model_state_dict': model.state_dict(), 'classes': classes}, save_path)
+            # final save asynchronously to avoid blocking caller; copy to CPU in thread
+            state_ref_final = model.state_dict()
+
+            def _final_save(path, state_ref_inner, classes_list):
+                try:
+                    cpu_state_inner = {k: v.cpu() for k, v in state_ref_inner.items()}
+                except Exception:
+                    cpu_state_inner = {k: v for k, v in state_ref_inner.items()}
+                try:
+                    torch.save({'model_state_dict': cpu_state_inner, 'classes': classes_list}, path)
+                except Exception:
+                    try:
+                        torch.save({'model_state_dict': cpu_state_inner}, path)
+                    except Exception:
+                        pass
+
+            t_final = threading.Thread(target=_final_save, args=(save_path, state_ref_final, classes), daemon=True)
+            t_final.start()
             best_path = save_path
         return best_acc
 
