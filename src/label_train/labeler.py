@@ -6,7 +6,7 @@
 遍历 images/trainingBackup/ 下所有图片，
 标注后将裁图保存到 images/labeledImages/<地块_占领>/
 
-画框（按住键 + 拖拽）：
+画框（按住键 + 鼠标左键已有框内任意位置）：
     1  粘土   2  森林   3  渔船   4  铜矿   5  石头
 
 改占领状态（按住键 + 点击已有框内任意位置）：
@@ -52,7 +52,9 @@ for _p in (_SRC_DIR, _LABEL_DIR):
 
 BACKUP_DIR  = os.path.join(_SRC_DIR, "images", "trainingBackup")
 LABELED_DIR = os.path.join(_SRC_DIR, "images", "labeledImages")
-MODEL_PATH  = os.path.join(_SRC_DIR, "clay_model.pth")
+# Resource field model path
+MODEL_PATH  = os.path.join(_SRC_DIR, "resourcefield_model.npz")
+TORCH_MODEL_PATH = os.path.join(_SRC_DIR, "resourcefield_model.pth")
 
 # Ensure labeled images directory structure exists: terrain / occupation
 _TERRAINS_EN = ["clay", "forest", "boat", "copper", "stone"]
@@ -104,6 +106,7 @@ class LabelCanvas(QWidget):
         self.cur_pt         = None
         self.active_terrain = None   # current Qt.Key_1..5
         self.occ_mode       = None   # "散人" | "联盟" | None  (Q / E held)
+        self.clear_mode     = False  # Space held -> clear clicked grid label
 
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
@@ -130,7 +133,9 @@ class LabelCanvas(QWidget):
     def _detect_grid(self):
         # 自动检测grid，保存所有格子的像素范围
         try:
-            scanner = FieldScanner()
+            # Quick fix: prefer the known default tile size to avoid
+            # incorrect tiny-grid detections on some resolutions.
+            scanner = FieldScanner(grid_fw=FieldScanner.DEFAULT_FW, grid_fh=FieldScanner.DEFAULT_FH)
             # 只用detect_yellow_frame和build_grid，不做分类
             fw, fh, frame = scanner.detect_yellow_frame(self.orig_img)
             if frame is None:
@@ -138,7 +143,15 @@ class LabelCanvas(QWidget):
                 return
             x, y, w, h = frame
             grid = scanner.build_grid(x, y, fw, fh, 0, 0, self.orig_img.shape[1], self.orig_img.shape[0])
-            self.grid_cells = [(tx, ty, fw, fh) for (tx, ty, fw, fh) in grid]
+            # compute ROI bounds: bottom area with aspect 966:1718
+            img_h, img_w = self.orig_img.shape[:2]
+            target_h = int(round(img_w * 966.0 / 1718.0))
+            top_bound = max(0, img_h - target_h)
+            cells = []
+            for (tx, ty, gfw, gfh) in grid:
+                allowed = (ty >= top_bound and (ty + gfh) <= img_h and tx >= 0 and (tx + gfw) <= img_w)
+                cells.append((tx, ty, gfw, gfh, allowed))
+            self.grid_cells = cells
         except Exception as e:
             print(f"[LabelCanvas] grid detect failed: {e}")
             self.grid_cells = []
@@ -157,11 +170,6 @@ class LabelCanvas(QWidget):
         self.offset_y = (ch - scaled.height()) // 2
         self.pixmap   = scaled
 
-    def resizeEvent(self, _e):
-        self._rebuild_pixmap()
-        self.update()
-
-    # ── 坐标转换 ──────────────────────────────────────────────────────────────
     def _to_orig(self, qpt):
         x = int((qpt.x() - self.offset_x) / self.scale)
         y = int((qpt.y() - self.offset_y) / self.scale)
@@ -190,6 +198,12 @@ class LabelCanvas(QWidget):
             key = e.key()
             terrain_map = {Qt.Key_1: "clay", Qt.Key_2: "forest", Qt.Key_3: "boat", Qt.Key_4: "copper", Qt.Key_5: "stone"}
             self.active_terrain = terrain_map.get(key, None)
+        elif e.key() == Qt.Key_N:
+            # N = mark negative tile
+            self.active_terrain = "negative"
+        elif e.key() == Qt.Key_Space:
+            # Space = enable clear-on-click mode
+            self.clear_mode = True
         elif e.key() == Qt.Key_Q:
             self.occ_mode = "individual"
         elif e.key() == Qt.Key_E:
@@ -200,6 +214,10 @@ class LabelCanvas(QWidget):
     def keyReleaseEvent(self, e):
         if e.key() in KEY_LABEL:
             self.active_terrain = None
+        elif e.key() == Qt.Key_N:
+            self.active_terrain = None
+        elif e.key() == Qt.Key_Space:
+            self.clear_mode = False
         elif e.key() in (Qt.Key_Q, Qt.Key_E):
             self.occ_mode = None
         else:
@@ -211,8 +229,23 @@ class LabelCanvas(QWidget):
         if e.button() == Qt.LeftButton:
             x, y = self._to_orig(e.pos())
             # 找到点击点所在的格子 (use diamond boundary)
-            for idx, (tx, ty, fw, fh) in enumerate(self.grid_cells):
+            for idx, cell in enumerate(self.grid_cells):
+                tx, ty, fw, fh, allowed = cell
+                if not allowed:
+                    continue
                 if self._point_in_diamond(x, y, tx, ty, fw, fh):
+                    # If space-clear mode is active, remove existing annotation on this grid
+                    if getattr(self, 'clear_mode', False):
+                        ann_idx = None
+                        for i, ann in enumerate(self.annotations):
+                            gx, gy = ann[0], ann[1]
+                            if gx == tx and gy == ty:
+                                ann_idx = i
+                                break
+                        if ann_idx is not None:
+                            self.annotations.pop(ann_idx)
+                            self.update()
+                        return
                     # 检查是否已有标注
                     ann_idx = None
                     for i, ann in enumerate(self.annotations):
@@ -227,8 +260,15 @@ class LabelCanvas(QWidget):
                         # 数字键按下，直接用格子精确标注（以菱形外接矩形保存）
                         terrain = self.active_terrain
                         if ann_idx is not None:
-                            # update existing
+                            # update existing: update label and color
+                            color = self.TERRAIN_COLOR_MAP.get(terrain, QColor(255, 210, 40))
                             self.annotations[ann_idx][4] = [terrain, occ]
+                            # ensure color slot exists
+                            if len(self.annotations[ann_idx]) >= 6:
+                                self.annotations[ann_idx][5] = color
+                            else:
+                                # append color if missing
+                                self.annotations[ann_idx].append(color)
                         else:
                             color = self.TERRAIN_COLOR_MAP.get(terrain, QColor(255, 210, 40))
                             # store [x1,y1,x2,y2, [terrain,occ], color, is_grid]
@@ -239,6 +279,13 @@ class LabelCanvas(QWidget):
                         # Q/E按下，切换占领状态
                         if ann_idx is not None:
                             self.annotations[ann_idx][4][1] = self.occ_mode
+                            self.update()
+                        else:
+                            # create a negative annotation with the chosen occupation
+                            terrain = "negative"
+                            occ = self.occ_mode
+                            color = QColor(180, 180, 180)
+                            self.annotations.append([tx, ty, tx+fw, ty+fh, [terrain, occ], color, True])
                             self.update()
                         return
         return super().mousePressEvent(e)
@@ -254,9 +301,9 @@ class LabelCanvas(QWidget):
             p.drawPixmap(self.offset_x, self.offset_y, self.pixmap)
         # Draw computed grid overlay (UI-only). Do NOT modify self.orig_img.
         if getattr(self, 'grid_cells', None):
-            pen = QPen(QColor(0, 200, 200, 160), 1)
-            p.setPen(pen)
-            for (tx, ty, gw, gh) in self.grid_cells:
+            for (tx, ty, gw, gh, allowed) in self.grid_cells:
+                pen = QPen(QColor(0, 200, 200, 160) if allowed else QColor(120, 120, 120, 100), 1)
+                p.setPen(pen)
                 top = QPoint(*self._to_widget(tx + gw // 2, ty))
                 right = QPoint(*self._to_widget(tx + gw, ty + gh // 2))
                 bottom = QPoint(*self._to_widget(tx + gw // 2, ty + gh))
@@ -392,8 +439,24 @@ class LabelCanvas(QWidget):
             occ_map = {"空": "free", "散人": "individual", "联盟": "alliance"}
             terrain = terrain_map.get(terrain, terrain)
             occ = occ_map.get(occ, occ)
-            cls_dir = os.path.join(LABELED_DIR, terrain, occ)
+            # If terrain is negative or unrecognized, store under negative/<occ>
+            if isinstance(terrain, str) and terrain.lower() in ("negative", "neg", "负", "负样本"):
+                cls_dir = os.path.join(LABELED_DIR, "negative", occ)
+            else:
+                cls_dir = os.path.join(LABELED_DIR, terrain, occ)
             os.makedirs(cls_dir, exist_ok=True)
+            # only save crops that are fully inside allowed ROI if grid-based
+            allowed_to_save = True
+            if len(ann) >= 7 and ann[6]:
+                # check whether this bbox is inside an allowed grid cell
+                # compare with self.grid_cells
+                allowed_to_save = False
+                for (tx, ty, gfw, gfh, allowed) in getattr(self, 'grid_cells', []):
+                    if tx == x1 and ty == y1 and (tx + gfw) == x2 and (ty + gfh) == y2:
+                        allowed_to_save = allowed
+                        break
+            if not allowed_to_save:
+                continue
             crop = self.orig_img[y1:y2, x1:x2]
             if crop.size == 0:
                 continue
@@ -406,29 +469,8 @@ class LabelCanvas(QWidget):
         """Export grid-based annotation centers for external calibration.
         Writes JSON to images/labeledImages/calibration/<base>.json
         """
-        if self.orig_img is None or not self.annotations:
-            return None
-        base = os.path.splitext(src_name)[0]
-        out = []
-        for ann in self.annotations:
-            # only grid-based annotations carry is_grid flag
-            is_grid = (len(ann) >= 7 and ann[6])
-            if not is_grid:
-                continue
-            x1, y1, x2, y2 = ann[0], ann[1], ann[2], ann[3]
-            cx = int(x1 + (x2 - x1) / 2)
-            cy = int(y1 + (y2 - y1) / 2)
-            fw = x2 - x1
-            fh = y2 - y1
-            out.append({"cx": cx, "cy": cy, "fw": fw, "fh": fh})
-        if not out:
-            return None
-        cal_dir = os.path.join(LABELED_DIR, "calibration")
-        os.makedirs(cal_dir, exist_ok=True)
-        fname = os.path.join(cal_dir, f"{base}.json")
-        with open(fname, "w", encoding="utf-8") as f:
-            json.dump(out, f, ensure_ascii=False, indent=2)
-        return fname
+        # Calibration export removed — do not write per-image calibration files.
+        return None
 
     def generate_negatives(self, src_name="img"):
         """Generate negative crops for grid cells in the current image that are not annotated.
@@ -445,7 +487,8 @@ class LabelCanvas(QWidget):
         for ann in self.annotations:
             if len(ann) >= 7 and ann[6]:
                 ann_origins.add((ann[0], ann[1]))
-        for i, (tx, ty, fw, fh) in enumerate(self.grid_cells):
+        for i, cell in enumerate(self.grid_cells):
+            tx, ty, fw, fh = cell[:4]
             if (tx, ty) in ann_origins:
                 continue
             x1, y1 = int(tx), int(ty)
@@ -463,14 +506,19 @@ class LabelCanvas(QWidget):
 #  对比窗口（标注 vs 模型识别）
 # ─────────────────────────────────────────────────────────────────────────────
 class CompareWindow(QDialog):
-    """左：真实标注；右：模型对当前图的预测。"""
-    def __init__(self, orig_img, annotations, parent=None):
+    """左：真实标注；右：模型预测（可在未标注图上展示）。"""
+    def __init__(self, orig_img, gt_annotations=None, predict_boxes=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("标注 vs 模型识别  对比")
         self.resize(1300, 650)
 
-        gt_img   = self._draw_gt(orig_img, annotations)
-        pred_img = self._draw_pred(orig_img, annotations)
+        if gt_annotations is None:
+            gt_annotations = []
+        self.gt_annotations = gt_annotations
+        self.predict_boxes = predict_boxes
+
+        gt_img = self._draw_gt(orig_img, self.gt_annotations)
+        pred_img = self._draw_pred(orig_img, self.predict_boxes if self.predict_boxes is not None else self.gt_annotations)
 
         combined = self._hstack(gt_img, pred_img)
         lbl = QLabel()
@@ -484,19 +532,17 @@ class CompareWindow(QDialog):
         hdr = QHBoxLayout()
         hdr.addWidget(QLabel("  📌  真实标注"))
         hdr.addStretch()
-        hdr.addWidget(QLabel("🤖  模型预测（框选范围取自标注）  "))
+        hdr.addWidget(QLabel("🤖  模型预测  "))
 
         layout = QVBoxLayout()
         layout.addLayout(hdr)
         layout.addWidget(scroll)
         self.setLayout(layout)
 
-    # ── 绘制真实标注图 ────────────────────────────────────────────────────────
     @staticmethod
     def _draw_gt(orig, annotations):
         img = orig.copy()
         for ann in annotations:
-            # support variable-length annotations
             x1, y1, x2, y2 = ann[0], ann[1], ann[2], ann[3]
             label = ann[4] if len(ann) > 4 else ["unknown", "free"]
             qcolor = ann[5] if len(ann) > 5 and isinstance(ann[5], QColor) else QColor(255, 255, 255)
@@ -504,54 +550,124 @@ class CompareWindow(QDialog):
             bgr = (qcolor.blue(), qcolor.green(), qcolor.red())
             cv2.rectangle(img, (x1, y1), (x2, y2), bgr, 2)
             label_str = f"[{terrain}, {occ}]"
-            cv2.putText(img, label_str, (x1 + 2, y1 + 14),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3)
-            cv2.putText(img, label_str, (x1 + 2, y1 + 14),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+            cv2.putText(img, label_str, (x1 + 2, y1 + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3)
+            cv2.putText(img, label_str, (x1 + 2, y1 + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
         return img
 
-    # ── 绘制模型预测图 ────────────────────────────────────────────────────────
     @staticmethod
-    def _draw_pred(orig, annotations):
+    def _draw_pred(orig, boxes):
         img = orig.copy()
         clf = None
-        if os.path.exists(MODEL_PATH):
+        # Prefer a PyTorch model if present
+        try:
+            sys.path.insert(0, _SRC_DIR)
             try:
-                sys.path.insert(0, _SRC_DIR)
-                from clay_classifier import ClayClassifier
-                clf = ClayClassifier()
+                from torch_classifier import TorchResourceFieldClassifier
+                torch_clf = TorchResourceFieldClassifier()
+                if os.path.exists(TORCH_MODEL_PATH) and torch_clf.load(TORCH_MODEL_PATH):
+                    clf = torch_clf
+            except Exception:
+                pass
+            # fallback to lightweight centroid classifier
+            if clf is None and os.path.exists(MODEL_PATH):
+                from resourcefield_classifier import ResourceFieldClassifier
+                clf = ResourceFieldClassifier()
                 if not clf.load(MODEL_PATH):
                     clf = None
-            except Exception:
-                clf = None
+        except Exception:
+            clf = None
 
-        for ann in annotations:
-            x1, y1, x2, y2 = ann[0], ann[1], ann[2], ann[3]
-            pred_label = "无模型"
+        # Normalize boxes and run prediction on diamond-shaped mask inside each box.
+        box_list = []
+        for b in boxes or []:
+            if isinstance(b, (list, tuple)) and len(b) >= 4:
+                box_list.append((int(b[0]), int(b[1]), int(b[2]), int(b[3])))
+
+        # terrain -> BGR color map for drawing
+        terrain_to_bgr = {
+            'clay':   (40, 100, 150),
+            'forest': (60, 200, 60),
+            'boat':   (220, 120, 40),
+            'copper': (60, 60, 220),
+            'stone':  (200, 200, 200),
+        }
+
+        for (x1, y1, x2, y2) in box_list:
+            gw = x2 - x1
+            gh = y2 - y1
+            # prepare diamond polygon (original-image coords)
+            pts = np.array([
+                (x1 + gw // 2, y1),
+                (x2, y1 + gh // 2),
+                (x1 + gw // 2, y2),
+                (x1, y1 + gh // 2),
+            ], dtype=np.int32)
+
+            pred_label = None
             pred_color = (128, 128, 128)
-            # ground-truth folder name derived from label if available
-            gt_folder = None
-            if len(ann) > 4:
-                lbl = ann[4]
-                if isinstance(lbl, (list, tuple)) and len(lbl) >= 2:
-                    terrain, occ = lbl[0], lbl[1]
-                    occ_en = "free" if occ in ("空", "free") else ("individual" if occ in ("散人","individual") else "alliance")
-                    gt_folder = terrain if occ_en == "free" else f"{terrain}_{occ_en}"
-
+            pred_conf = 0.0
             if clf is not None:
-                crop = orig[y1:y2, x1:x2]
+                crop = orig[y1:y2, x1:x2].copy()
                 if crop.size > 0:
-                    name, conf = clf.predict(crop)
-                    pred_label = f"{name} {conf:.0%}"
-                    if gt_folder is not None:
-                        pred_color = (0, 200, 0) if name == gt_folder else (0, 60, 220)
+                    ch, cw = crop.shape[:2]
+                    # require a minimal diamond size
+                    if cw > 8 and ch > 8:
+                        # create diamond mask based on the actual crop size to avoid shape mismatch
+                        mask = np.zeros((ch, cw), dtype=np.uint8)
+                        poly = np.array([[
+                            (cw // 2, 0), (cw - 1, ch // 2), (cw // 2, ch - 1), (0, ch // 2)
+                        ]], dtype=np.int32)
+                        cv2.fillPoly(mask, poly, 255)
+                        # apply mask: set background to mean color to avoid confusing classifier
+                        bg = crop.mean(axis=(0, 1)).astype(np.uint8)
+                        bg_img = np.zeros_like(crop)
+                        bg_img[:, :] = bg
+                        masked = np.where(mask[:, :, None] == 255, crop, bg_img)
+                        name, conf = clf.predict(masked)
+                    else:
+                        name, conf = (None, 0.0)
+                    pred_label = name
+                    pred_conf = conf
+                    # classifier may return combined class names like "clay_individual"
+                    # split into terrain and occupation when present
+                    terrain_name = None
+                    occ_name = "free"
+                    if isinstance(name, str) and name:
+                        parts = name.split("_")
+                        terrain_name = parts[0]
+                        if len(parts) > 1:
+                            occ_name = parts[1]
+                    else:
+                        terrain_name = None
+                    pred_color = terrain_to_bgr.get(terrain_name, pred_color)
 
-            cv2.rectangle(img, (x1, y1), (x2, y2), pred_color, 2)
-            cv2.putText(img, pred_label, (x1 + 2, y1 + 14),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3)
-            cv2.putText(img, pred_label, (x1 + 2, y1 + 14),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45,
-                        tuple(int(c) for c in pred_color), 1)
+            # Only draw when classifier predicts a known terrain with modest confidence
+            if pred_label is not None and terrain_name in terrain_to_bgr and pred_conf >= 0.15:
+                # translucent fill
+                overlay = img.copy()
+                cv2.fillPoly(overlay, [pts], color=pred_color)
+                alpha = 0.28
+                cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
+                # outline
+                cv2.polylines(img, [pts], isClosed=True, color=pred_color, thickness=2)
+                # label near center
+                cx = x1 + gw // 2
+                cy = y1 + gh // 2
+                # draw occupation overlay similar to ground-truth visualization
+                if occ_name in ("individual", "散人"):
+                    # white translucent fill
+                    occ_overlay = img.copy()
+                    cv2.fillPoly(occ_overlay, [pts], color=(255, 255, 255))
+                    cv2.addWeighted(occ_overlay, 0.18, img, 1 - 0.18, 0, img)
+                elif occ_name in ("alliance", "联盟"):
+                    occ_overlay = img.copy()
+                    cv2.fillPoly(occ_overlay, [pts], color=(0, 0, 0))
+                    cv2.addWeighted(occ_overlay, 0.18, img, 1 - 0.18, 0, img)
+
+                label_str = f"{terrain_name}, {occ_name} {int(pred_conf*100)}%"
+                cv2.putText(img, label_str, (cx - gw//4, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0,0,0), 3)
+                cv2.putText(img, label_str, (cx - gw//4, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.45, pred_color, 1)
+            # else: do not draw anything for negative / low-confidence boxes
         return img
 
     @staticmethod
@@ -564,6 +680,34 @@ class CompareWindow(QDialog):
             return im
         sep = np.full((h, 6, 3), 60, dtype=np.uint8)
         return np.hstack([pad(a), sep, pad(b)])
+
+    @staticmethod
+    def _to_pixmap(bgr_img):
+        h, w = bgr_img.shape[:2]
+        rgb  = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
+        qimg = QImage(rgb.data, w, h, w * 3, QImage.Format_RGB888)
+        return QPixmap.fromImage(qimg)
+
+
+class PredictWindow(QDialog):
+    """单张图片展示：仅显示模型在整张图上的识别结果（不显示真实标注）。"""
+    def __init__(self, orig_img, predict_boxes=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("模型识别结果")
+        self.resize(1100, 700)
+        # Use CompareWindow._draw_pred to reuse prediction drawing logic
+        pred_img = CompareWindow._draw_pred(orig_img, predict_boxes)
+        lbl = QLabel()
+        lbl.setPixmap(self._to_pixmap(pred_img))
+        lbl.setAlignment(Qt.AlignCenter)
+
+        scroll = QScrollArea()
+        scroll.setWidget(lbl)
+        scroll.setWidgetResizable(True)
+
+        layout = QVBoxLayout()
+        layout.addWidget(scroll)
+        self.setLayout(layout)
 
     @staticmethod
     def _to_pixmap(bgr_img):
@@ -629,6 +773,8 @@ class LabelerWindow(QMainWindow):
         self.btn_save.clicked.connect(self._do_save)
         self.btn_undo.clicked.connect(self.canvas.undo)
         self.btn_clear.clicked.connect(self.canvas.clear)
+        # Rename the button label to reflect single-image prediction display
+        self.btn_compare.setText("🔎 显示识别结果")
         self.btn_compare.clicked.connect(self._do_compare)
         self.btn_train.clicked.connect(self._do_train)
 
@@ -640,6 +786,9 @@ class LabelerWindow(QMainWindow):
         QShortcut(QKeySequence("Right"), self).activated.connect(self._go_next)
         QShortcut(QKeySequence("Z"),     self).activated.connect(self.canvas.undo)
         QShortcut(QKeySequence("C"),     self).activated.connect(self.canvas.clear)
+        # X or Delete = remove current image from backup folder
+        QShortcut(QKeySequence("X"),     self).activated.connect(self._do_delete_current)
+        QShortcut(QKeySequence("Delete"),self).activated.connect(self._do_delete_current)
 
         # ── 图例 ─────────────────────────────────────────────────────────────
         legend = QHBoxLayout()
@@ -765,8 +914,25 @@ class LabelerWindow(QMainWindow):
                 neg_n = self.canvas.generate_negatives(src_name)
                 if neg_n:
                     msg += f"  生成负样本 {neg_n} 张"
+            # 删除原始备份图片（用户要求：保存后删除）
+            try:
+                backup_path = self.image_paths[self.cur_idx]
+                if os.path.exists(backup_path):
+                    os.remove(backup_path)
+                    msg += "  已删除原始备份"
+            except Exception as ex:
+                msg += f"  删除备份失败: {ex}"
             self.lbl_status.setText(msg)
-            self._go_next()
+            # 刷新文件列表并移动到下一张
+            # 清空并重新加载文件列表以反映已删除的文件
+            self.labeled_set = set()
+            self._load_file_list()
+            # 选中原位置或下一项
+            if self.image_paths:
+                new_idx = min(self.cur_idx, len(self.image_paths) - 1)
+                self.file_list.setCurrentRow(new_idx)
+            else:
+                self.cur_idx = -1
 
     def _do_generate_negatives(self):
         """Manual trigger: generate negative crops for current image."""
@@ -778,6 +944,27 @@ class LabelerWindow(QMainWindow):
             self.lbl_status.setText(f"✅ 生成负样本 {n} 张 → images/labeledImages/negative/free/")
         else:
             self.lbl_status.setText("⚠ 未生成负样本（可能已全部标注或无可用网格）")
+
+    def _do_delete_current(self):
+        """Delete the current backup image immediately (no confirmation) and refresh list."""
+        if self.cur_idx < 0 or self.cur_idx >= len(self.image_paths):
+            return
+        path = self.image_paths[self.cur_idx]
+        name = os.path.basename(path)
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+            self.lbl_status.setText(f"✅ 已删除：{name}")
+        except Exception as ex:
+            self.lbl_status.setText(f"❌ 删除失败：{ex}")
+        # reload file list and select next
+        self.labeled_set = set()
+        self._load_file_list()
+        if self.image_paths:
+            new_idx = min(self.cur_idx, len(self.image_paths) - 1)
+            self.file_list.setCurrentRow(new_idx)
+        else:
+            self.cur_idx = -1
 
     def _toggle_auto_negatives(self):
         """Toggle automatic negative generation after save."""
@@ -791,19 +978,36 @@ class LabelerWindow(QMainWindow):
         if self.canvas.orig_img is None:
             self.lbl_status.setText("⚠ 请先选择图片")
             return
-        if not self.canvas.annotations:
-            self.lbl_status.setText("⚠ 请先画标注框再对比")
+        img = self.canvas.orig_img
+        # Always try to build a grid from the detected yellow anchor and use that
+        # grid as the set of boxes for model prediction. This ensures the right
+        # side shows model output rather than simply mirroring the annotations.
+        try:
+            # Use default locked grid size to avoid spurious small cells
+            scanner = FieldScanner(grid_fw=FieldScanner.DEFAULT_FW, grid_fh=FieldScanner.DEFAULT_FH)
+            fw, fh, frame = scanner.detect_yellow_frame(img)
+            if frame is None:
+                self.lbl_status.setText("⚠ 未检测到黄菱形锚点，无法生成网格进行模型预测")
+                return
+            ax, ay, _, _ = frame
+            h, w = img.shape[:2]
+            boxes = scanner.build_grid(ax, ay, fw, fh, 0, 0, w, h)
+            predict_boxes = [(tx, ty, tx + gw, ty + gh) for (tx, ty, gw, gh) in boxes]
+            dlg = PredictWindow(img, predict_boxes=predict_boxes, parent=self)
+            dlg.exec_()
+        except Exception as ex:
+            self.lbl_status.setText(f"⚠ 对比时出错：{ex}")
             return
-        dlg = CompareWindow(self.canvas.orig_img, self.canvas.annotations, self)
-        dlg.exec_()
 
     # ── 训练 ─────────────────────────────────────────────────────────────────
     def _do_train(self):
+        # Prefer PyTorch trainer when available; otherwise use lightweight baseline
+        use_torch = False
         try:
-            from clay_classifier import ClayClassifier
-        except ImportError:
-            QMessageBox.critical(self, "错误", "找不到 clay_classifier.py")
-            return
+            import torch  # type: ignore
+            use_torch = True
+        except Exception:
+            use_torch = False
         # 统计样本
         total = 0
         if os.path.isdir(LABELED_DIR):
@@ -815,24 +1019,79 @@ class LabelerWindow(QMainWindow):
             QMessageBox.warning(self, "样本不足",
                                 f"当前共 {total} 张裁图，建议每类至少 20 张再训练。")
             return
+        epochs_to_use = 30
         self.lbl_status.setText("🚀 训练中，请稍候…")
         QApplication.processEvents()
+        def progress_cb(epoch, batch_idx, num_batches, train_loss=None, train_acc=None, val_loss=None, val_acc=None):
+            # Build succinct status strings
+            tr_acc_s = f" tr={train_acc*100:.1f}%" if train_acc is not None else ""
+            val_acc_s = f" val={val_acc*100:.1f}%" if val_acc is not None else ""
+            status_text = f"🚀 训练中  epoch {epoch}/{epochs_to_use}  batch {batch_idx}/{num_batches}{tr_acc_s}{val_acc_s}"
+            try:
+                self.lbl_status.setText(status_text)
+            except Exception:
+                try:
+                    self.lbl_status.setText(f"🚀 训练中  epoch {epoch}/{epochs_to_use}  batch {batch_idx}/{num_batches}")
+                except Exception:
+                    pass
+            # Also print to terminal for logging/monitoring
+            try:
+                print(f"[TRAIN] {status_text}", flush=True)
+            except Exception:
+                pass
+            QApplication.processEvents()
         try:
-            clf = ClayClassifier()
-            acc = clf.train(data_dir=LABELED_DIR, save_path=MODEL_PATH, epochs=30)
-            self.lbl_status.setText(
-                f"✅ 训练完成  验证精度 {acc*100:.1f}%  → {MODEL_PATH}"
-            )
-            # 训练完自动弹对比窗口
-            if self.canvas.orig_img is not None and self.canvas.annotations:
-                dlg = CompareWindow(self.canvas.orig_img, self.canvas.annotations, self)
-                dlg.exec_()
+            if use_torch:
+                try:
+                    from torch_classifier import TorchResourceFieldClassifier
+                except Exception:
+                    QMessageBox.critical(self, "错误", "检测到 PyTorch 但无法导入 torch_classifier.py")
+                    return
+                clf = TorchResourceFieldClassifier()
+                print(f"[TRAIN] Starting PyTorch training for {epochs_to_use} epochs...", flush=True)
+                acc = clf.train(data_dir=LABELED_DIR, save_path=TORCH_MODEL_PATH, epochs=epochs_to_use, progress_callback=progress_cb)
+                msg = f"✅ 训练完成  验证精度 {acc*100:.1f}%  → {TORCH_MODEL_PATH}"
+                self.lbl_status.setText(msg)
+                print(f"[TRAIN] Finished. {msg}", flush=True)
             else:
-                QMessageBox.information(
-                    self, "训练完成",
-                    f"验证精度：{acc*100:.1f}%\n模型：{MODEL_PATH}\n\n"
-                    f"选择一张有标注框的图片后点「🔍 对比」可查看效果。"
-                )
+                from resourcefield_classifier import ResourceFieldClassifier
+                clf = ResourceFieldClassifier()
+                # baseline training is fast; show simple status before/after
+                self.lbl_status.setText("🚀 训练中（基线模型）…")
+                print(f"[TRAIN] Starting baseline training for {epochs_to_use} epochs...", flush=True)
+                QApplication.processEvents()
+                acc = clf.train(data_dir=LABELED_DIR, save_path=MODEL_PATH, epochs=epochs_to_use)
+                msg = f"✅ 训练完成  验证精度 {acc*100:.1f}%  → {MODEL_PATH}"
+                self.lbl_status.setText(msg)
+                print(f"[TRAIN] Finished. {msg}", flush=True)
+            # 训练完成后弹出对比：使用一张未标注的备份图并在其网格上展示模型预测
+            try:
+                # choose first unannotated image
+                idx = next((i for i in range(len(self.image_paths)) if i not in self.labeled_set), None)
+                if idx is None and self.image_paths:
+                    idx = 0
+                if idx is not None:
+                    img_path = self.image_paths[idx]
+                    img = cv2.imdecode(np.fromfile(img_path, dtype=np.uint8), cv2.IMREAD_COLOR)
+                    if img is not None:
+                        scanner = FieldScanner()
+                        fw, fh, frame = scanner.detect_yellow_frame(img)
+                        if frame is not None:
+                            ax, ay, _, _ = frame
+                            h, w = img.shape[:2]
+                            boxes = scanner.build_grid(ax, ay, fw, fh, 0, 0, w, h)
+                            # boxes is list of (tx,ty,fw,fh) -> convert to x1,y1,x2,y2
+                            predict_boxes = [(tx, ty, tx+gw, ty+gh) for (tx, ty, gw, gh) in boxes]
+                            dlg = PredictWindow(img, predict_boxes=predict_boxes, parent=self)
+                            dlg.exec_()
+                        else:
+                            QMessageBox.information(self, "训练完成", f"训练完成：{acc*100:.1f}%\n但未能在样本图中检测到锚点以展示预测。")
+                    else:
+                        QMessageBox.information(self, "训练完成", f"训练完成：{acc*100:.1f}%\n无法读取样本图。")
+                else:
+                    QMessageBox.information(self, "训练完成", f"训练完成：{acc*100:.1f}%\n未找到样本图片用于展示。")
+            except Exception as ex:
+                QMessageBox.information(self, "训练完成", f"训练完成：{acc*100:.1f}%\n但展示预测时出错：{ex}")
         except Exception as ex:
             self.lbl_status.setText(f"❌ 训练失败：{ex}")
             QMessageBox.critical(self, "训练失败", str(ex))

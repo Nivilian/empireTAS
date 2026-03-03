@@ -31,6 +31,7 @@ class EmpireOverlay(QWidget):
         self.add_control_button("Scroll Test", self.scroll_test)
         self.add_control_button("ROI Test", self.roi_test)
         self.add_control_button("Capture Test", self.run_vision_test)
+        self.add_control_button("Browse Map (Predict)", self.browse_map)
         self.add_control_button("Test Field", self.test_field)
         self.add_control_button("Save Screenshot (x)", self.save_screenshot)
         self.add_control_button("SHUT DOWN (esc)", self.close_app, is_danger=True)
@@ -44,8 +45,7 @@ class EmpireOverlay(QWidget):
         self.army_scanner = ArmyScanner()
         # English: Locked grid size from reference run: dist=194.74 → fw=194, fh=97
         self.field_scanner = FieldScanner(self.target_title, grid_fw=194, grid_fh=97, threshold=0.18)
-        # load optional click calibration (normalized offsets)
-        self._load_click_calibration()
+        # Calibration disabled: we will not load per-image calibration JSONs.
 
         # English: Global ESC hotkey — works even when the overlay is not focused
         keyboard.add_hotkey('esc', self.close_app)
@@ -83,68 +83,8 @@ class EmpireOverlay(QWidget):
         return False
 
     def _load_click_calibration(self):
-        """Load calibration JSONs exported by the labeler and compute normalized offset.
-        The labeler exports per-image calibration files to images/labeledImages/calibration/<base>.json
-        Each contains entries with cx,cy coordinates in image pixels. We compute (cx - w/2)/w
-        and (cy - h/2)/h averaged across samples to produce a normalized offset.
-        """
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        calib_dir = os.path.join(base_dir, "images", "labeledImages", "calibration")
-        backup_dir = os.path.join(base_dir, "images", "trainingBackup")
-        self.cal_nx = 0.0
-        self.cal_ny = 0.0
-        self.cal_count = 0
-        if not os.path.isdir(calib_dir):
-            return
-        vals_x = []
-        vals_y = []
-        for jf in glob.glob(os.path.join(calib_dir, "*.json")):
-            try:
-                with open(jf, "r", encoding="utf-8") as f:
-                    pts = json.load(f)
-            except Exception:
-                continue
-            base = os.path.splitext(os.path.basename(jf))[0]
-            # find corresponding backup image to get image size
-            candidates = [p for p in glob.glob(os.path.join(backup_dir, base + ".*"))]
-            if not candidates:
-                # try any image starting with base
-                candidates = [p for p in glob.glob(os.path.join(backup_dir, base + "*"))]
-            if not candidates:
-                continue
-            img_path = candidates[0]
-            try:
-                img = cv2.imdecode(np.fromfile(img_path, dtype=np.uint8), cv2.IMREAD_COLOR)
-                if img is None:
-                    continue
-                h, w = img.shape[:2]
-            except Exception:
-                continue
-            for p in pts:
-                if not ("cx" in p and "cy" in p):
-                    continue
-                cx = float(p["cx"])
-                cy = float(p["cy"])
-                nx = (cx - (w / 2.0)) / w
-                ny = (cy - (h / 2.0)) / h
-                vals_x.append(nx)
-                vals_y.append(ny)
-        if vals_x:
-            self.cal_nx = float(np.mean(vals_x))
-            self.cal_ny = float(np.mean(vals_y))
-            self.cal_count = len(vals_x)
-            # persist a quick summary for debugging
-            outp = {
-                "nx": self.cal_nx,
-                "ny": self.cal_ny,
-                "count": self.cal_count,
-            }
-            try:
-                os.makedirs(os.path.join(base_dir, "images", "labeledImages", "calibration"), exist_ok=True)
-                with open(os.path.join(base_dir, "images", "labeledImages", "calibration", "offset.json"), "w", encoding="utf-8") as fo:
-                    json.dump(outp, fo, ensure_ascii=False, indent=2)
-            except Exception:
-                pass
+        # Calibration handling removed — nothing to do here.
+        return
 
     def once_harv(self):
         self.label.setText("Harvesting...")
@@ -268,15 +208,9 @@ class EmpireOverlay(QWidget):
             rect = win32gui.GetClientRect(hwnd)
             rect_w, rect_h = (rect[2] - rect[0]), (rect[3] - rect[1])
             cx, cy = rect_w // 2, rect_h // 2
-            # apply calibration normalized offsets if available
-            try:
-                off_x = int(self.cal_nx * rect_w)
-                off_y = int(self.cal_ny * rect_h)
-            except Exception:
-                off_x = 0
-                off_y = 0
-            click_x = cx + off_x
-            click_y = cy + off_y
+            # No per-image calibration: click the centre
+            click_x = cx
+            click_y = cy
             # apply small up-left diagonal shift of 0.1 * edge length (if fw/fh known)
             try:
                 fw, fh = self.field_scanner.grid_fw, self.field_scanner.grid_fh
@@ -291,8 +225,8 @@ class EmpireOverlay(QWidget):
             click_y -= shift
             # Debug: print and show computed click and shift
             try:
-                print(f"[ClickCal] raw_center=({cx},{cy}) cal_offset=({off_x},{off_y}) shift={shift} -> click=({click_x},{click_y})")
-                self.label.setText(f"Click({click_x},{click_y}) shift={shift} cal_samples={getattr(self,'cal_count',0)}")
+                print(f"[Click] raw_center=({cx},{cy}) shift={shift} -> click=({click_x},{click_y})")
+                self.label.setText(f"Click({click_x},{click_y}) shift={shift}")
             except Exception:
                 pass
             pt = win32gui.ClientToScreen(hwnd, (click_x, click_y))
@@ -356,27 +290,8 @@ class EmpireOverlay(QWidget):
                 print(f"[AnchorCal] detected_anchor=({anchor_fx+shift},{anchor_fy+shift}) applied_shift={shift} -> anchor=({anchor_fx},{anchor_fy})")
             except Exception:
                 pass
-            # --- Save an anchor-focused crop (but keep full img for the main save) ---
-            try:
-                cx_tile = int(anchor_fx + fw // 2)
-                cy_tile = int(anchor_fy + fh // 2)
-                mult = 3
-                half_w = max(int(mult * fw), fw)
-                half_h = max(int(mult * fh), fh)
-                x1 = max(0, cx_tile - half_w)
-                y1 = max(0, cy_tile - half_h)
-                x2 = min(img.shape[1], cx_tile + half_w)
-                y2 = min(img.shape[0], cy_tile + half_h)
-                anchor_crop = img[y1:y2, x1:x2].copy()
-                if anchor_crop.size > 0:
-                    # save anchor crop to a separate folder for labeler convenience
-                    anchor_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images", "trainingBackup", "anchors")
-                    os.makedirs(anchor_dir, exist_ok=True)
-                    anchor_fname = os.path.join(anchor_dir, uuid.uuid4().hex.upper() + "_ANCHOR.jpg")
-                    cv2.imencode(".jpg", anchor_crop)[1].tofile(anchor_fname)
-                    print(f"[Crop] saved anchor-crop {anchor_fname} size=({anchor_crop.shape[1]}x{anchor_crop.shape[0]}) crop_xy=({x1},{y1})")
-            except Exception:
-                pass
+            # Anchor crop is detected in-memory for grid construction but we do not
+            # save any anchor-focused image files to disk (per configuration).
         else:
             # fallback: use centre
             h, w = img.shape[:2]
@@ -412,6 +327,14 @@ class EmpireOverlay(QWidget):
         hits_empty    = results.get("空粘土",     [])
         hits_occupied = results.get("被占领粘土", [])
         self.label.setText(f"empty={len(hits_empty)}  occupied={len(hits_occupied)}")
+
+    def browse_map(self):
+        """Trigger map browse + prediction via FieldScanner.browse_and_predict()."""
+        try:
+            self.field_scanner.browse_and_predict(target_title=self.target_title, status_cb=self.label.setText)
+            self.label.setText("浏览完成 — 见 Map Predictions 窗口")
+        except Exception as ex:
+            self.label.setText(f"浏览失败：{ex}")
 
     def roi_test(self):
         """Show extended ROI and all slot_topright candidates colour-coded by match score."""
