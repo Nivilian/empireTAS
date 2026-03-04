@@ -1,4 +1,14 @@
 import sys, time, os, cv2, win32gui, win32con, win32api
+import ctypes
+# Declare per-monitor DPI awareness so all Win32 calls use physical pixels,
+# consistent with PrintWindow captures. Must be called before any GUI is created.
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()   # fallback for older Windows
+    except Exception:
+        pass
 import math
 import numpy as np
 import pygetwindow as gw
@@ -231,9 +241,10 @@ class EmpireOverlay(QWidget):
             click_y = cy
             # apply small up-left diagonal shift of 0.1 * edge length (if fw/fh known)
             try:
-                fw, fh = self.field_scanner.grid_fw, self.field_scanner.grid_fh
-                if fw and fh:
-                    s = math.hypot(fw / 2.0, fh / 2.0)
+                _fw0 = int(round(self.field_scanner.grid_fw * rect_w / 1718.0))
+                _fh0 = int(round(self.field_scanner.grid_fh * rect_h / 966.0))
+                if _fw0 and _fh0:
+                    s = math.hypot(_fw0 / 2.0, _fh0 / 2.0)
                     shift = int(round(0.1 * s / math.sqrt(2)))
                 else:
                     shift = 0
@@ -261,7 +272,7 @@ class EmpireOverlay(QWidget):
         img = screen
 
         # Detect yellow diamond anchor (pass clicked centre in full-image coords)
-        fw, fh = self.field_scanner.grid_fw, self.field_scanner.grid_fh
+        fw, fh = self.field_scanner._tile_for(img)
         click_x = cx
         click_y = cy
 
@@ -294,7 +305,7 @@ class EmpireOverlay(QWidget):
             anchor_fx, anchor_fy, _, _ = anchor_rect
             # apply the same up-left diagonal shift to the saved screenshot's anchor
             try:
-                fw, fh = self.field_scanner.grid_fw, self.field_scanner.grid_fh
+                fw, fh = self.field_scanner._tile_for(img)
                 if fw and fh:
                     s = math.hypot(fw / 2.0, fh / 2.0)
                     shift = int(round(0.1 * s / math.sqrt(2)))

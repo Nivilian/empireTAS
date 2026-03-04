@@ -165,6 +165,14 @@ class FieldScanner:
 
         # 仅保留截图和锚定grid相关功能，不加载分类器
 
+    def _tile_for(self, screen):
+        """Return (fw, fh) scaled to the given screen's actual resolution.
+        self.grid_fw / self.grid_fh are stored in reference pixels at 1718×966."""
+        sh, sw = screen.shape[:2]
+        fw = int(round(self.grid_fw * sw / 1718.0))
+        fh = int(round(self.grid_fh * sh / 966.0))
+        return fw, fh
+
     # ------------------------------------------------------------------ #
     #  Yellow diamond detection                                            #
     # ------------------------------------------------------------------ #
@@ -214,7 +222,11 @@ class FieldScanner:
         else:
             size_sources.extend(self.KNOWN_TILE_SIZES)
 
-        for fw, fh in size_sources:
+        scale_x = sw / BASE_W
+        scale_y = sh / BASE_H
+        for fw_ref, fh_ref in size_sources:
+            fw = int(round(fw_ref * scale_x))
+            fh = int(round(fh_ref * scale_y))
             # print(f"  [TileFrame] Synthetic template match (fw={fw}, fh={fh})")
             tpl  = np.zeros((fh, fw), dtype=np.uint8)
             pts  = np.array([[fw//2, 0], [fw-1, fh//2],
@@ -239,13 +251,14 @@ class FieldScanner:
             # print("  [TileFrame] no yellow contours in ROI")
             return None, None, None
 
-        MIN_W, MAX_W = 80, 360
-        MIN_H, MAX_H = 45, 200
+        MIN_W, MAX_W = int(80 * sw / BASE_W), int(360 * sw / BASE_W)
+        MIN_H, MAX_H = int(45 * sh / BASE_H), int(200 * sh / BASE_H)
+        MIN_AREA = 300 * (sw / BASE_W) * (sh / BASE_H)
         # print(f"  [TileFrame] {len(cnts)} contours, filtering...")
         candidates = []
         for c in cnts:
             area = cv2.contourArea(c)
-            if area < 300: continue
+            if area < MIN_AREA: continue
             x, y, w, h = cv2.boundingRect(c)
             aspect    = w / h if h > 0 else 0
             fill      = area / (w * h) if w * h > 0 else 1.0
@@ -386,7 +399,7 @@ class FieldScanner:
             anchor_fy = c2y - fh // 2
             work_screen = screen2
         else:
-            fw, fh = self.grid_fw, self.grid_fh
+            fw, fh = self._tile_for(screen)
             # print(f"  [TileFrame] locked grid → fw={fw}  fh={fh}")
             anchor_fx = c1x - fw // 2
             anchor_fy = c1y - fh // 2
@@ -467,10 +480,10 @@ class FieldScanner:
             zone_str = z[0] if z else "????"
 
             # Coords (bottom-left + right 814 + up 26, 61×20 px)
-            hw_b = int(round(61 * scale / 2))
+            hw_b = int(round(55 * scale / 2))
             hh_b = max(1, int(round(20 * scale / 2)))
-            cx_b = int(round(814 * scale))
-            cy_b = ih - int(round(26 * scale))
+            cx_b = int(round(820 * scale))
+            cy_b = ih - int(round(27 * scale))
             bx1, by1 = max(0, cx_b - hw_b), max(0, cy_b - hh_b)
             bx2, by2 = min(iw, cx_b + hw_b), min(ih, cy_b + hh_b)
             raw_b = _ocr(img[by1:by2, bx1:bx2], '0123456789/')
@@ -934,10 +947,10 @@ class FieldScanner:
         ax2, ay2 = min(iw, cx_a + hw_a), min(ih, cy_a + hh_a)
 
         # --- ROI-B: map coordinates (bottom-left origin + right 814 + up 24) ---
-        hw_b = int(round(61 * scale / 2))
-        hh_b = max(1, int(round(20 * scale / 2)))
-        cx_b = int(round(814 * scale))
-        cy_b = ih - int(round(26 * scale))
+        hw_b = int(round(57 * scale / 2))
+        hh_b = max(1, int(round(22 * scale / 2)))
+        cx_b = int(round(817 * scale))
+        cy_b = ih - int(round(29 * scale))
         bx1, by1 = max(0, cx_b - hw_b), max(0, cy_b - hh_b)
         bx2, by2 = min(iw, cx_b + hw_b), min(ih, cy_b + hh_b)
 
@@ -1269,11 +1282,13 @@ class FieldScanner:
 
         # click center (with small up-left shift similar to other callers)
         rect = win32gui.GetClientRect(hwnd)
-        cx, cy = (rect[2] - rect[0]) // 2, (rect[3] - rect[1]) // 2
+        _rw = rect[2] - rect[0]; _rh = rect[3] - rect[1]
+        cx, cy = _rw // 2, _rh // 2
         try:
-            fw, fh = self.grid_fw, self.grid_fh
-            if fw and fh:
-                s = math.hypot(fw / 2.0, fh / 2.0)
+            _fw0 = int(round(self.grid_fw * _rw / 1718.0))
+            _fh0 = int(round(self.grid_fh * _rh / 966.0))
+            if _fw0 and _fh0:
+                s = math.hypot(_fw0 / 2.0, _fh0 / 2.0)
                 shift = int(round(0.1 * s / math.sqrt(2)))
             else:
                 shift = 0
@@ -1300,7 +1315,7 @@ class FieldScanner:
         img, crop_top = _crop_bottom(screen)
 
         # detect anchor, try fallback click sequence like other callers
-        fw, fh = self.grid_fw, self.grid_fh
+        fw, fh = self._tile_for(img)
         cy_img = max(0, cy - crop_top)
         _, _, anchor = self.detect_yellow_frame(img, cx, cy_img)
         if anchor is None:
