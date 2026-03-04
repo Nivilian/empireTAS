@@ -90,7 +90,7 @@ def get_game_rect(screen, min_content_ratio=0.5):
     if cw < w * min_content_ratio or ch < h * min_content_ratio:
         return 0, 0, w, h
 
-    print(f"  [GameRect] cropped  x={x1}:{x2}  y={y1}:{y2}  ({cw}x{ch})  full=({w}x{h})")
+    # print(f"  [GameRect] cropped  x={x1}:{x2}  y={y1}:{y2}  ({cw}x{ch})  full=({w}x{h})")
     return x1, y1, cw, ch
 
 

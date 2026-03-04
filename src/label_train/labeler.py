@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 地块标注工具  —  独立运行
 ==========================
@@ -30,9 +31,11 @@ import json
 from PyQt5.QtCore    import Qt, QPoint, QRect
 from PyQt5.QtGui     import QColor, QFont, QImage, QKeySequence, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
-    QApplication, QDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QMainWindow, QMessageBox, QPushButton, QScrollArea, QShortcut,
-    QSplitter, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QDoubleSpinBox, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QMainWindow, QMessageBox, QProgressBar, QPushButton, QScrollArea, QShortcut,
+    QSpinBox, QSplitter, QVBoxLayout, QWidget,
 )
 
 import sys, os
@@ -208,6 +211,9 @@ class LabelCanvas(QWidget):
             self.occ_mode = "individual"
         elif e.key() == Qt.Key_E:
             self.occ_mode = "alliance"
+        elif e.key() == Qt.Key_W:
+            # W = mark free (empty) when held and clicking a grid
+            self.occ_mode = "free"
         else:
             super().keyPressEvent(e)
 
@@ -218,7 +224,7 @@ class LabelCanvas(QWidget):
             self.active_terrain = None
         elif e.key() == Qt.Key_Space:
             self.clear_mode = False
-        elif e.key() in (Qt.Key_Q, Qt.Key_E):
+        elif e.key() in (Qt.Key_Q, Qt.Key_E, Qt.Key_W):
             self.occ_mode = None
         else:
             super().keyReleaseEvent(e)
@@ -234,25 +240,34 @@ class LabelCanvas(QWidget):
                 if not allowed:
                     continue
                 if self._point_in_diamond(x, y, tx, ty, fw, fh):
-                    # If space-clear mode is active, remove existing annotation on this grid
-                    if getattr(self, 'clear_mode', False):
-                        ann_idx = None
-                        for i, ann in enumerate(self.annotations):
-                            gx, gy = ann[0], ann[1]
-                            if gx == tx and gy == ty:
-                                ann_idx = i
-                                break
-                        if ann_idx is not None:
-                            self.annotations.pop(ann_idx)
-                            self.update()
-                        return
-                    # 检查是否已有标注
+                    # 检查是否已有标注（提前计算，供后续分支使用）
                     ann_idx = None
                     for i, ann in enumerate(self.annotations):
                         gx, gy = ann[0], ann[1]
                         if gx == tx and gy == ty:
                             ann_idx = i
                             break
+                    # If space-clear mode is active, remove existing annotation on this grid
+                    if getattr(self, 'clear_mode', False):
+                        if ann_idx is not None:
+                            self.annotations.pop(ann_idx)
+                            self.update()
+                        return
+                    # If Shift is held during click, mark as negative/free (or with occ_mode)
+                    if int(e.modifiers()) & int(Qt.ShiftModifier):
+                        occ = self.occ_mode if self.occ_mode else "free"
+                        color = QColor(180, 180, 180)
+                        if ann_idx is not None:
+                            # update existing annotation to negative
+                            self.annotations[ann_idx][4] = ["negative", occ]
+                            if len(self.annotations[ann_idx]) >= 6:
+                                self.annotations[ann_idx][5] = color
+                            else:
+                                self.annotations[ann_idx].append(color)
+                        else:
+                            self.annotations.append([tx, ty, tx+fw, ty+fh, ["negative", occ], color, True])
+                        self.update()
+                        return
                     # 判断当前按键
                     terrain = None
                     occ = "free"
@@ -718,6 +733,372 @@ class PredictWindow(QDialog):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  辅助：修复 SpinBox 数字乱码
+# ─────────────────────────────────────────────────────────────────────────────
+def _apply_spinbox_font(widget):
+    """在中文 Windows 上，QSpinBox 内部 QLineEdit 不继承 app 字体，
+    必须直接 setFont 才能让数字用 Segoe UI 字形（而非 CJK 数字字形）。"""
+    from PyQt5.QtGui import QFont
+    _f = QFont("Segoe UI", 9)
+    for w in widget.findChildren((QSpinBox, QDoubleSpinBox)):
+        w.setFont(_f)
+        try:
+            if w.lineEdit():
+                w.lineEdit().setFont(_f)
+        except Exception:
+            pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  训练参数设置对话框
+# ─────────────────────────────────────────────────────────────────────────────
+class TrainSettingsDialog(QDialog):
+    """弹出对话框，让用户调整所有训练超参数再开始训练。"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("训练参数设置")
+        self.setMinimumWidth(420)
+
+        main_layout = QVBoxLayout(self)
+
+        # ── 训练类型 ─────────────────────────────────────────────────────────
+        grp_mode = QGroupBox("训练类型")
+        form_mode = QFormLayout(grp_mode)
+        self.cb_train_mode = QComboBox()
+        self.cb_train_mode.addItems(["固定参数", "随机搜索 (Random Search)", "网格搜索 (Grid Search)"])
+        lbl_mode_hint = QLabel("随机/网格搜索: 自动尝试多组超参，保留测试集最优模型")
+        lbl_mode_hint.setStyleSheet("color:#888; font-size:10px;")
+        form_mode.addRow("训练类型", self.cb_train_mode)
+        form_mode.addRow(lbl_mode_hint)
+
+        # ── 基础参数 ─────────────────────────────────────────────────────────
+        grp_basic = QGroupBox("基础参数")
+        form_basic = QFormLayout(grp_basic)
+
+        self.sp_epochs = QSpinBox(); self.sp_epochs.setRange(1, 500); self.sp_epochs.setValue(30)
+        self.sp_batch  = QSpinBox(); self.sp_batch.setRange(1, 256);  self.sp_batch.setValue(32)
+        self.sp_lr     = QDoubleSpinBox()
+        self.sp_lr.setRange(1e-6, 0.5); self.sp_lr.setSingleStep(0.0001)
+        self.sp_lr.setDecimals(6); self.sp_lr.setValue(0.001)
+
+        self.cb_model = QComboBox()
+        self.cb_model.addItems(["resnet18", "mobilenet_v2", "custom"])
+
+        self.cb_scheduler = QComboBox()
+        self.cb_scheduler.addItems(["cosine", "plateau", "none"])
+        self.cb_scheduler.setCurrentText("cosine")
+        lbl_sched_hint = QLabel("cosine: 自动衰减LR(推荐)   plateau: 需开启每epoch评估")
+        lbl_sched_hint.setStyleSheet("color:#888; font-size:10px;")
+
+        self.chk_pretrained  = QCheckBox("使用预训练权重")
+        self.chk_pretrained.setChecked(False)
+        self.chk_class_w     = QCheckBox("使用类别权重平衡")
+        self.chk_class_w.setChecked(True)
+
+        form_basic.addRow("训练轮数 (epochs)",  self.sp_epochs)
+        form_basic.addRow("批大小 (batch_size)", self.sp_batch)
+        form_basic.addRow("学习率 (lr)",         self.sp_lr)
+        form_basic.addRow("模型架构",            self.cb_model)
+        form_basic.addRow("LR Scheduler",        self.cb_scheduler)
+        form_basic.addRow(lbl_sched_hint)
+        form_basic.addRow(self.chk_pretrained)
+        form_basic.addRow(self.chk_class_w)
+
+        # ── 参数搜索范围 ─────────────────────────────────────────────────────
+        self.grp_search = QGroupBox("搜索参数范围 (逗号分隔候选值)")
+        form_search = QFormLayout(self.grp_search)
+
+        self.le_search_epochs = QLineEdit("30, 60")
+        self.le_search_batch  = QLineEdit("16, 32")
+        self.le_search_lr     = QLineEdit("0.001, 0.0003, 0.0001")
+        self.le_search_k      = QLineEdit("3, 5")
+        self.sp_num_trials    = QSpinBox()
+        self.sp_num_trials.setRange(1, 200); self.sp_num_trials.setValue(6)
+        self._lbl_trials      = QLabel("最大次数 (随机搜索)")
+        lbl_k_hint = QLabel("每次切换 K 前会将现有 cluster_* 文件还原再重新聚类")
+        lbl_k_hint.setStyleSheet("color:#888; font-size:10px;")
+
+        form_search.addRow("Epochs 候选",         self.le_search_epochs)
+        form_search.addRow("Batch 候选",          self.le_search_batch)
+        form_search.addRow("LR 候选",             self.le_search_lr)
+        form_search.addRow("Negative K 候选",     self.le_search_k)
+        form_search.addRow(lbl_k_hint)
+        form_search.addRow(self._lbl_trials, self.sp_num_trials)
+        lbl_sh = QLabel("网格搜索: 尝试所有组合   随机搜索: 随机采样至多N次")
+        lbl_sh.setStyleSheet("color:#888; font-size:10px;")
+        form_search.addRow(lbl_sh)
+
+        self.grp_search.setVisible(False)
+
+        # ── 数据划分 ─────────────────────────────────────────────────────────
+        grp_split = QGroupBox("数据划分")
+        form_split = QFormLayout(grp_split)
+
+        self.sp_val  = QDoubleSpinBox(); self.sp_val.setRange(0.05, 0.45);  self.sp_val.setSingleStep(0.05);  self.sp_val.setDecimals(2); self.sp_val.setValue(0.20)
+        self.sp_test = QDoubleSpinBox(); self.sp_test.setRange(0.05, 0.45); self.sp_test.setSingleStep(0.05); self.sp_test.setDecimals(2); self.sp_test.setValue(0.20)
+        self.chk_val_during = QCheckBox("每 epoch 评估验证集")
+        self.chk_val_during.setChecked(False)
+
+        form_split.addRow("验证集比例 (val_split)",  self.sp_val)
+        form_split.addRow("测试集比例 (test_split)", self.sp_test)
+        form_split.addRow(self.chk_val_during)
+
+        # ── 高级 / 性能 ──────────────────────────────────────────────────────
+        grp_adv = QGroupBox("高级 / 性能")
+        form_adv = QFormLayout(grp_adv)
+
+        self.sp_workers   = QSpinBox(); self.sp_workers.setRange(0, 16); self.sp_workers.setValue(4)
+        self.chk_pin_mem  = QCheckBox("pin_memory (GPU 加速)")
+        self.chk_pin_mem.setChecked(True)
+        self.chk_persist  = QCheckBox("persistent_workers")
+        self.chk_persist.setChecked(True)   # default True on Windows: avoids per-epoch spawn stalls
+
+        self.sp_num_conv   = QSpinBox(); self.sp_num_conv.setRange(1, 8); self.sp_num_conv.setValue(3)
+        self.sp_base_ch    = QSpinBox(); self.sp_base_ch.setRange(8, 256); self.sp_base_ch.setValue(32)
+        lbl_conv_hint = QLabel("仅 custom 模型有效")
+        lbl_conv_hint.setStyleSheet("color:#888; font-size:10px;")
+
+        form_adv.addRow("DataLoader workers", self.sp_workers)
+        form_adv.addRow(self.chk_pin_mem)
+        form_adv.addRow(self.chk_persist)
+        form_adv.addRow("Custom 卷积层数",   self.sp_num_conv)
+        form_adv.addRow("Custom 基础通道数", self.sp_base_ch)
+        form_adv.addRow(lbl_conv_hint)
+
+        # 仅在选 custom 模型时启用卷积层数/通道数控件
+        def _on_model_changed(text):
+            is_custom = (text == "custom")
+            self.sp_num_conv.setEnabled(is_custom)
+            self.sp_base_ch.setEnabled(is_custom)
+            lbl_conv_hint.setEnabled(is_custom)
+        self.cb_model.currentTextChanged.connect(_on_model_changed)
+        _on_model_changed(self.cb_model.currentText())  # 初始化状态
+
+        # 训练模式切换：搜索模式时显示搜索范围组，置灰基础参数中的 lr/epochs/batch
+        def _on_mode_changed(text):
+            is_search = "搜索" in text
+            self.grp_search.setVisible(is_search)
+            is_random = "随机" in text
+            self._lbl_trials.setVisible(is_random)
+            self.sp_num_trials.setVisible(is_random)
+            for w in (self.sp_epochs, self.sp_batch, self.sp_lr):
+                w.setEnabled(not is_search)
+            self.adjustSize()
+        self.cb_train_mode.currentTextChanged.connect(_on_mode_changed)
+        _on_mode_changed(self.cb_train_mode.currentText())
+
+        # ── 按钮 ─────────────────────────────────────────────────────────────
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        main_layout.addWidget(grp_mode)
+        main_layout.addWidget(grp_basic)
+        main_layout.addWidget(self.grp_search)
+        main_layout.addWidget(grp_split)
+        main_layout.addWidget(grp_adv)
+        main_layout.addWidget(buttons)
+        _apply_spinbox_font(self)
+
+    @staticmethod
+    def _parse_values(text, cast):
+        """Parse comma-separated candidate values, e.g. '0.001, 0.0003' -> [0.001, 0.0003]."""
+        result = []
+        for part in text.split(","):
+            part = part.strip()
+            if part:
+                try:
+                    result.append(cast(part))
+                except ValueError:
+                    pass
+        return result if result else [cast("1")]
+
+    def get_params(self) -> dict:
+        mode_txt = self.cb_train_mode.currentText()
+        if "随机" in mode_txt:
+            train_mode = "random_search"
+        elif "网格" in mode_txt:
+            train_mode = "grid_search"
+        else:
+            train_mode = "fixed"
+        return dict(
+            train_mode           = train_mode,
+            epochs               = self.sp_epochs.value(),
+            batch_size           = self.sp_batch.value(),
+            lr                   = self.sp_lr.value(),
+            model_type           = self.cb_model.currentText(),
+            lr_scheduler         = self.cb_scheduler.currentText(),
+            pretrained           = self.chk_pretrained.isChecked(),
+            use_class_weights    = self.chk_class_w.isChecked(),
+            val_split            = self.sp_val.value(),
+            test_split           = self.sp_test.value(),
+            validate_during_training = self.chk_val_during.isChecked(),
+            num_workers          = self.sp_workers.value(),
+            pin_memory           = self.chk_pin_mem.isChecked(),
+            persistent_workers   = self.chk_persist.isChecked(),
+            num_conv             = self.sp_num_conv.value(),
+            base_channels        = self.sp_base_ch.value(),
+            search_epochs        = self._parse_values(self.le_search_epochs.text(), int),
+            search_batch         = self._parse_values(self.le_search_batch.text(), int),
+            search_lr            = self._parse_values(self.le_search_lr.text(), float),
+            search_neg_k         = self._parse_values(self.le_search_k.text(), int),
+            num_trials           = self.sp_num_trials.value(),
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  聚类参数设置对话框
+# ─────────────────────────────────────────────────────────────────────────────
+class ClusterSettingsDialog(QDialog):
+    """弹出对话框，让用户调整负样本聚类参数再执行聚类。"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("聚类参数设置")
+        self.setMinimumWidth(340)
+
+        layout = QVBoxLayout(self)
+
+        grp_main = QGroupBox("聚类参数")
+        form = QFormLayout(grp_main)
+
+        self.sp_k      = QSpinBox(); self.sp_k.setRange(2, 30); self.sp_k.setValue(5)
+        self.le_prefix = QLineEdit("cluster")
+
+        form.addRow("分组数 k",       self.sp_k)
+        form.addRow("子目录前缀",     self.le_prefix)
+
+        grp_feat = QGroupBox("特征提取（HSV 直方图）")
+        form_feat = QFormLayout(grp_feat)
+
+        self.sp_resize = QSpinBox(); self.sp_resize.setRange(8, 128); self.sp_resize.setValue(32)
+        self.sp_h_bins = QSpinBox(); self.sp_h_bins.setRange(2,  36); self.sp_h_bins.setValue(18)
+        self.sp_s_bins = QSpinBox(); self.sp_s_bins.setRange(2,  16); self.sp_s_bins.setValue(8)
+        self.sp_v_bins = QSpinBox(); self.sp_v_bins.setRange(2,  16); self.sp_v_bins.setValue(8)
+
+        form_feat.addRow("缩放尺寸 (px)",  self.sp_resize)
+        form_feat.addRow("H 直方图桶数",   self.sp_h_bins)
+        form_feat.addRow("S 直方图桶数",   self.sp_s_bins)
+        form_feat.addRow("V 直方图桶数",   self.sp_v_bins)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout.addWidget(grp_main)
+        layout.addWidget(grp_feat)
+        layout.addWidget(buttons)
+        _apply_spinbox_font(self)
+
+    def get_params(self) -> dict:
+        return dict(
+            k       = self.sp_k.value(),
+            prefix  = self.le_prefix.text().strip() or "cluster",
+            resize  = self.sp_resize.value(),
+            h_bins  = self.sp_h_bins.value(),
+            s_bins  = self.sp_s_bins.value(),
+            v_bins  = self.sp_v_bins.value(),
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  误分类图片浏览对话框
+# ─────────────────────────────────────────────────────────────────────────────
+class MisclassifiedDialog(QDialog):
+    """训练结束后显示测试集中预测错误的图片，辅助发现标注错误。"""
+    _COLS   = 6
+    _IMG_SZ = 88
+    _TILE_W = 114
+    _TILE_H = 162
+    _CAP    = 300
+
+    def __init__(self, misclassified, parent=None):
+        super().__init__(parent)
+        n = len(misclassified)
+        self.setWindowTitle(f"误分类图片 ({n} 张) — 检查标注是否有误")
+        self.resize(self._COLS * (self._TILE_W + 8) + 40, 640)
+
+        container = QWidget()
+        grid = QGridLayout(container)
+        grid.setSpacing(5)
+        grid.setContentsMargins(6, 6, 6, 6)
+
+        for i, item in enumerate(misclassified[:self._CAP]):
+            frame = QFrame()
+            frame.setFixedSize(self._TILE_W, self._TILE_H)
+            frame.setStyleSheet(
+                "QFrame { border:1px solid #555; background:#1c1c1c; border-radius:4px; }"
+            )
+            vbox = QVBoxLayout(frame)
+            vbox.setContentsMargins(3, 4, 3, 4)
+            vbox.setSpacing(2)
+
+            img_lbl = QLabel()
+            img_lbl.setFixedSize(self._IMG_SZ, self._IMG_SZ)
+            img_lbl.setAlignment(Qt.AlignCenter)
+            try:
+                pix = QPixmap(item['path'])
+                if not pix.isNull():
+                    img_lbl.setPixmap(
+                        pix.scaled(self._IMG_SZ, self._IMG_SZ,
+                                   Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    )
+                else:
+                    img_lbl.setText("?")
+            except Exception:
+                img_lbl.setText("!")
+            vbox.addWidget(img_lbl, 0, Qt.AlignCenter)
+
+            # T = 标注真实类别 (green)
+            lbl_t = QLabel(f"T: {item['true']}")
+            lbl_t.setStyleSheet("color:#44ee44; font-size:9px;")
+            lbl_t.setAlignment(Qt.AlignCenter)
+            lbl_t.setWordWrap(True)
+            vbox.addWidget(lbl_t)
+
+            # P = 模型预测类别 (red)
+            lbl_p = QLabel(f"P: {item['pred']}  {item['conf']*100:.0f}%")
+            lbl_p.setStyleSheet("color:#ff5555; font-size:9px;")
+            lbl_p.setAlignment(Qt.AlignCenter)
+            lbl_p.setWordWrap(True)
+            vbox.addWidget(lbl_p)
+
+            # 文件名 (灰色小字)
+            fname = os.path.basename(item['path'])
+            if len(fname) > 18:
+                fname = fname[:15] + "..."
+            lbl_name = QLabel(fname)
+            lbl_name.setStyleSheet("color:#888888; font-size:8px;")
+            lbl_name.setAlignment(Qt.AlignCenter)
+            lbl_name.setWordWrap(True)
+            vbox.addWidget(lbl_name)
+
+            row, col = divmod(i, self._COLS)
+            grid.addWidget(frame, row, col)
+
+        scroll = QScrollArea()
+        scroll.setWidget(container)
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border:none; }")
+
+        trunc = f"  (已截断至 {self._CAP} 张)" if n > self._CAP else ""
+        hint = QLabel(
+            f"测试集共 {n} 张预测错误{trunc}\n"
+            "绿色 T = 标注类别    红色 P = 模型预测类别    百分比 = 置信度\n"
+            "若 T 和 P 相差大，请检查该图片标注是否正确。"
+        )
+        hint.setStyleSheet("color:#aaaaaa; font-size:10px; padding:6px 4px 2px 4px;")
+        hint.setWordWrap(True)
+
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self.accept)
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(hint)
+        lay.addWidget(scroll, 1)
+        lay.addWidget(close_btn)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  主窗口
 # ─────────────────────────────────────────────────────────────────────────────
 class LabelerWindow(QMainWindow):
@@ -754,14 +1135,18 @@ class LabelerWindow(QMainWindow):
         # 生成负样本按钮与自动开关（手动/自动）
         self.btn_gen_neg = QPushButton("生成负样本")
         self.btn_auto_neg = QPushButton("自动生成负样本：关")
+        self.btn_cluster_neg = QPushButton("🔀 聚类负样本")
         self.btn_gen_neg.setFixedHeight(28)
         self.btn_auto_neg.setFixedHeight(28)
+        self.btn_cluster_neg.setFixedHeight(28)
         self.btn_gen_neg.clicked.connect(self._do_generate_negatives)
         self.btn_auto_neg.clicked.connect(self._toggle_auto_negatives)
+        self.btn_cluster_neg.clicked.connect(self._do_cluster_negatives)
         self.auto_generate_negatives = False
 
         for btn in [self.btn_prev, self.btn_next, self.btn_save, self.btn_undo,
-                self.btn_clear, self.btn_compare, self.btn_train, self.btn_gen_neg, self.btn_auto_neg]:
+                self.btn_clear, self.btn_compare, self.btn_train,
+                self.btn_gen_neg, self.btn_auto_neg, self.btn_cluster_neg]:
             btn.setFixedHeight(28)
         self.btn_save.setStyleSheet("background:#1a7a1a; color:white; font-weight:bold;")
         self.btn_train.setStyleSheet("background:#1a3a99; color:white; font-weight:bold;")
@@ -818,6 +1203,7 @@ class LabelerWindow(QMainWindow):
         top_bar.addWidget(self.btn_save)
         top_bar.addWidget(self.btn_gen_neg)
         top_bar.addWidget(self.btn_auto_neg)
+        top_bar.addWidget(self.btn_cluster_neg)
         top_bar.addWidget(self.btn_undo)
         top_bar.addWidget(self.btn_clear)
         top_bar.addSpacing(12)
@@ -826,9 +1212,16 @@ class LabelerWindow(QMainWindow):
         top_bar.addStretch()
         top_bar.addWidget(self.lbl_status)
 
+        # ── 训练进度条 ────────────────────────────────────────────────────────
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setFixedHeight(16)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setVisible(False)
+
         right_layout = QVBoxLayout()
         right_layout.setContentsMargins(4, 4, 4, 4)
         right_layout.addLayout(top_bar)
+        right_layout.addWidget(self.progress_bar)
         right_layout.addLayout(legend)
         right_layout.addWidget(self.canvas, 1)
 
@@ -945,6 +1338,32 @@ class LabelerWindow(QMainWindow):
         else:
             self.lbl_status.setText("⚠ 未生成负样本（可能已全部标注或无可用网格）")
 
+    def _do_cluster_negatives(self):
+        """Auto-cluster all negatives into sub-directories via K-means on HSV histograms."""
+        dlg = ClusterSettingsDialog(self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        p = dlg.get_params()
+        self.lbl_status.setText(f"⏳ 正在聚类（k={p['k']}）...")
+        QApplication.processEvents()
+        try:
+            from cluster_negatives import cluster_negatives
+            report = cluster_negatives(
+                data_dir=LABELED_DIR,
+                k=p['k'],
+                dry_run=False,
+                prefix=p['prefix'],
+                resize=p['resize'],
+                hist_bins=(p['h_bins'], p['s_bins'], p['v_bins']),
+            )
+            counts = ", ".join(f"{name}:{len(files)}张" for name, files in report.items())
+            self.lbl_status.setText(
+                f"✅ 聚类完成({p['k']}组): {counts}  "
+                f"— 可在 labeledImages/negative/ 中重命名子目录（如 city、empty）后重新训练"
+            )
+        except Exception as ex:
+            self.lbl_status.setText(f"❌ 聚类失败: {ex}")
+
     def _do_delete_current(self):
         """Delete the current backup image immediately (no confirmation) and refresh list."""
         if self.cur_idx < 0 or self.cur_idx >= len(self.image_paths):
@@ -1019,88 +1438,406 @@ class LabelerWindow(QMainWindow):
             QMessageBox.warning(self, "样本不足",
                                 f"当前共 {total} 张裁图，建议每类至少 20 张再训练。")
             return
-        epochs_to_use = 30
-        self.lbl_status.setText("🚀 训练中，请稍候…")
-        QApplication.processEvents()
-        def progress_cb(epoch, batch_idx, num_batches, train_loss=None, train_acc=None, val_loss=None, val_acc=None):
-            # Build succinct status strings
-            tr_acc_s = f" tr={train_acc*100:.1f}%" if train_acc is not None else ""
-            val_acc_s = f" val={val_acc*100:.1f}%" if val_acc is not None else ""
-            status_text = f"🚀 训练中  epoch {epoch}/{epochs_to_use}  batch {batch_idx}/{num_batches}{tr_acc_s}{val_acc_s}"
-            try:
-                self.lbl_status.setText(status_text)
-            except Exception:
-                try:
-                    self.lbl_status.setText(f"🚀 训练中  epoch {epoch}/{epochs_to_use}  batch {batch_idx}/{num_batches}")
-                except Exception:
-                    pass
-            # Also print to terminal for logging/monitoring
-            try:
-                print(f"[TRAIN] {status_text}", flush=True)
-            except Exception:
-                pass
+        # ── 弹出参数设置对话框 ────────────────────────────────────────────────
+        settings_dlg = TrainSettingsDialog(self)
+        if settings_dlg.exec_() != QDialog.Accepted:
+            return
+        tp = settings_dlg.get_params()
+
+        if not use_torch:
+            # Baseline branch (no search support)
+            self.lbl_status.setText("Training (baseline model)...")
             QApplication.processEvents()
-        try:
-            if use_torch:
-                try:
-                    from torch_classifier import TorchResourceFieldClassifier
-                except Exception:
-                    QMessageBox.critical(self, "错误", "检测到 PyTorch 但无法导入 torch_classifier.py")
-                    return
-                clf = TorchResourceFieldClassifier()
-                print(f"[TRAIN] Starting PyTorch training for {epochs_to_use} epochs...", flush=True)
-                acc = clf.train(data_dir=LABELED_DIR, save_path=TORCH_MODEL_PATH, epochs=epochs_to_use, progress_callback=progress_cb)
-                msg = f"✅ 训练完成  验证精度 {acc*100:.1f}%  → {TORCH_MODEL_PATH}"
-                self.lbl_status.setText(msg)
-                print(f"[TRAIN] Finished. {msg}", flush=True)
-            else:
+            try:
                 from resourcefield_classifier import ResourceFieldClassifier
                 clf = ResourceFieldClassifier()
-                # baseline training is fast; show simple status before/after
-                self.lbl_status.setText("🚀 训练中（基线模型）…")
-                print(f"[TRAIN] Starting baseline training for {epochs_to_use} epochs...", flush=True)
-                QApplication.processEvents()
-                acc = clf.train(data_dir=LABELED_DIR, save_path=MODEL_PATH, epochs=epochs_to_use)
-                msg = f"✅ 训练完成  验证精度 {acc*100:.1f}%  → {MODEL_PATH}"
+                acc = clf.train(data_dir=LABELED_DIR, save_path=MODEL_PATH, epochs=tp['epochs'])
+                msg = f"Training complete  val_acc {acc*100:.1f}%  -> {MODEL_PATH}"
                 self.lbl_status.setText(msg)
                 print(f"[TRAIN] Finished. {msg}", flush=True)
-            # 训练完成后弹出对比：使用一张未标注的备份图并在其网格上展示模型预测
-            try:
-                # choose first unannotated image
-                idx = next((i for i in range(len(self.image_paths)) if i not in self.labeled_set), None)
-                if idx is None and self.image_paths:
-                    idx = 0
-                if idx is not None:
-                    img_path = self.image_paths[idx]
-                    img = cv2.imdecode(np.fromfile(img_path, dtype=np.uint8), cv2.IMREAD_COLOR)
-                    if img is not None:
-                        scanner = FieldScanner()
-                        fw, fh, frame = scanner.detect_yellow_frame(img)
-                        if frame is not None:
-                            ax, ay, _, _ = frame
-                            h, w = img.shape[:2]
-                            boxes = scanner.build_grid(ax, ay, fw, fh, 0, 0, w, h)
-                            # boxes is list of (tx,ty,fw,fh) -> convert to x1,y1,x2,y2
-                            predict_boxes = [(tx, ty, tx+gw, ty+gh) for (tx, ty, gw, gh) in boxes]
-                            dlg = PredictWindow(img, predict_boxes=predict_boxes, parent=self)
-                            dlg.exec_()
-                        else:
-                            QMessageBox.information(self, "训练完成", f"训练完成：{acc*100:.1f}%\n但未能在样本图中检测到锚点以展示预测。")
-                    else:
-                        QMessageBox.information(self, "训练完成", f"训练完成：{acc*100:.1f}%\n无法读取样本图。")
-                else:
-                    QMessageBox.information(self, "训练完成", f"训练完成：{acc*100:.1f}%\n未找到样本图片用于展示。")
             except Exception as ex:
-                QMessageBox.information(self, "训练完成", f"训练完成：{acc*100:.1f}%\n但展示预测时出错：{ex}")
+                self.lbl_status.setText(f"❌ 训练失败：{ex}")
+                QMessageBox.critical(self, "训练失败", str(ex))
+            return
+
+        # ── PyTorch 训练 ─────────────────────────────────────────────────────
+        try:
+            from torch_classifier import TorchResourceFieldClassifier  # noqa: F401
+        except Exception:
+            QMessageBox.critical(self, "错误", "检测到 PyTorch 但无法导入 torch_classifier.py")
+            return
+
+        # 删除旧模型文件，强制从头训练
+        try:
+            if os.path.exists(TORCH_MODEL_PATH):
+                os.remove(TORCH_MODEL_PATH)
+            if os.path.exists(MODEL_PATH):
+                os.remove(MODEL_PATH)
+        except Exception:
+            pass
+
+        if tp['train_mode'] == 'fixed':
+            self._run_fixed_train(tp)
+        else:
+            self._run_search_train(tp)
+
+    # ── 固定参数训练 ─────────────────────────────────────────────────────────
+    def _run_fixed_train(self, tp):
+        from torch_classifier import TorchResourceFieldClassifier
+        epochs_to_use = tp['epochs']
+        self.lbl_status.setText("Training... please wait...")
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(True)
+        QApplication.processEvents()
+
+        def progress_cb(epoch, batch_idx, num_batches, train_loss=None, train_acc=None,
+                        val_loss=None, val_acc=None):
+            # Every batch: update the progress bar
+            self.progress_bar.setMaximum(num_batches)
+            self.progress_bar.setValue(batch_idx)
+            self.progress_bar.setFormat(
+                f"Epoch {epoch}/{epochs_to_use}   batch {batch_idx}/{num_batches}"
+            )
+            # Terminal: overwrite same line with batch progress
+            try:
+                bar_w = 20
+                filled = int(bar_w * batch_idx / num_batches) if num_batches else 0
+                bar = '█' * filled + '░' * (bar_w - filled)
+                print(f"\r[TRAIN] epoch {epoch:>3}/{epochs_to_use}  [{bar}] {batch_idx}/{num_batches}",
+                      end='', flush=True)
+            except Exception:
+                pass
+            # End of epoch (val_acc slot carries test_acc): update status + log once
+            if val_acc is not None:
+                tr_s = f"  tr={train_acc*100:.1f}%" if train_acc is not None else ""
+                val_label = "val" if tp['validate_during_training'] else "test"
+                self.lbl_status.setText(
+                    f"Epoch {epoch}/{epochs_to_use}{tr_s}   "
+                    f"{val_label}={val_acc*100:.1f}%"
+                )
+                try:
+                    tr_str = f"  tr={train_acc*100:.1f}%" if train_acc is not None else ""
+                    print(
+                        f"\r[TRAIN] epoch {epoch:>3}/{epochs_to_use}{tr_str}"
+                        f"   {val_label}={val_acc*100:.1f}%",
+                        flush=True
+                    )
+                except Exception:
+                    pass
+            QApplication.processEvents()
+
+        try:
+            clf = TorchResourceFieldClassifier()
+            print(
+                f"[TRAIN] Fixed: epochs={tp['epochs']} batch={tp['batch_size']} "
+                f"lr={tp['lr']} model={tp['model_type']} scheduler={tp['lr_scheduler']}",
+                flush=True
+            )
+            acc = clf.train(
+                data_dir=LABELED_DIR,
+                save_path=TORCH_MODEL_PATH,
+                epochs=tp['epochs'],
+                batch_size=tp['batch_size'],
+                lr=tp['lr'],
+                model_type=tp['model_type'],
+                lr_scheduler=tp['lr_scheduler'],
+                pretrained=tp['pretrained'],
+                val_split=tp['val_split'],
+                test_split=tp['test_split'],
+                validate_during_training=tp['validate_during_training'],
+                use_class_weights=tp['use_class_weights'],
+                num_workers=tp['num_workers'],
+                pin_memory=tp['pin_memory'],
+                persistent_workers=tp['persistent_workers'],
+                num_conv=tp['num_conv'],
+                base_channels=tp['base_channels'],
+                progress_callback=progress_cb,
+            )
+            msg = f"训练完成  test_acc={acc*100:.1f}%  -> {TORCH_MODEL_PATH}"
+            self.progress_bar.setVisible(False)
+            self.lbl_status.setText(msg)
+            print(f"[TRAIN] Finished. {msg}", flush=True)
+            self._show_misclassified(clf)
+            self._show_predict_after_train(acc)
         except Exception as ex:
+            self.progress_bar.setVisible(False)
             self.lbl_status.setText(f"❌ 训练失败：{ex}")
             QMessageBox.critical(self, "训练失败", str(ex))
+
+    # ── 负样本还原：将 cluster_* 中的文件移回 negative/free/ ────────────────
+    @staticmethod
+    def _restore_negatives_to_free():
+        """Move all images from cluster_* subdirs of negative/ back to negative/free/
+        so that cluster_negatives() can re-cluster from a clean state."""
+        import shutil as _shutil
+        from pathlib import Path as _Path
+        neg_root = _Path(LABELED_DIR) / "negative"
+        if not neg_root.exists():
+            return
+        free_dir = neg_root / "free"
+        free_dir.mkdir(parents=True, exist_ok=True)
+        img_exts = {".png", ".jpg", ".jpeg", ".bmp"}
+        SOURCE_DIRS = {"free", "individual", "alliance"}
+        moved = 0
+        for sub in list(neg_root.iterdir()):
+            if not sub.is_dir() or sub.name in SOURCE_DIRS:
+                continue
+            # this is a cluster_* (or any other non-source) dir — move files back
+            for f in list(sub.iterdir()):
+                if f.is_file() and f.suffix.lower() in img_exts:
+                    dst = free_dir / f.name
+                    if dst.exists():   # avoid collision
+                        dst = free_dir / f"{f.stem}_{moved}{f.suffix}"
+                    _shutil.move(str(f), str(dst))
+                    moved += 1
+            # remove now-empty cluster dir
+            try:
+                sub.rmdir()
+            except OSError:
+                pass
+        print(f"[K-SEARCH] restored {moved} negatives → negative/free/", flush=True)
+
+    # ── 参数搜索训练 ─────────────────────────────────────────────────────────
+    def _run_search_train(self, tp):
+        import itertools
+        import random as _random
+        import shutil
+        from torch_classifier import TorchResourceFieldClassifier
+
+        search_k = tp.get('search_neg_k', [None])   # [None] means "don't change K"
+        all_combos = list(itertools.product(
+            tp['search_epochs'], tp['search_batch'], tp['search_lr'], search_k
+        ))
+        if tp['train_mode'] == 'random_search':
+            _random.shuffle(all_combos)
+            all_combos = all_combos[:tp['num_trials']]
+
+        total_trials = len(all_combos)
+        has_k_search = not (len(search_k) == 1 and search_k[0] is None)
+        print(f"[SEARCH] Mode={tp['train_mode']}  total combos={total_trials}", flush=True)
+        print(f"[SEARCH] model={tp['model_type']} scheduler={tp['lr_scheduler']}", flush=True)
+        if has_k_search:
+            print(f"[SEARCH] Negative K candidates={search_k}  (will re-cluster before each K change)", flush=True)
+
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(True)
+        QApplication.processEvents()
+
+        best_acc   = -1.0
+        best_combo = None
+        best_clf   = None
+        results    = []
+        tmp_path   = TORCH_MODEL_PATH + ".search_tmp.pth"
+
+        _epoch_total = [0]
+        _trial_num   = [0]
+        _last_k      = [None]   # track last K used to avoid redundant re-clustering
+
+        def progress_cb(epoch, batch_idx, num_batches, train_loss=None, train_acc=None,
+                        val_loss=None, val_acc=None):
+            # Every batch: update the progress bar
+            self.progress_bar.setMaximum(num_batches)
+            self.progress_bar.setValue(batch_idx)
+            self.progress_bar.setFormat(
+                f"[{_trial_num[0]}/{total_trials}] Epoch {epoch}/{_epoch_total[0]}   "
+                f"batch {batch_idx}/{num_batches}"
+            )
+            # Terminal: overwrite same line with batch progress
+            try:
+                bar_w = 20
+                filled = int(bar_w * batch_idx / num_batches) if num_batches else 0
+                bar = '█' * filled + '░' * (bar_w - filled)
+                print(f"\r[SEARCH] trial {_trial_num[0]}/{total_trials}  "
+                      f"epoch {epoch:>3}/{_epoch_total[0]}  [{bar}] {batch_idx}/{num_batches}",
+                      end='', flush=True)
+            except Exception:
+                pass
+            # End of epoch: update status label + log once
+            if val_acc is not None:
+                tr_s = f"  tr={train_acc*100:.1f}%" if train_acc is not None else ""
+                val_label = "val" if tp['validate_during_training'] else "test"
+                self.lbl_status.setText(
+                    f"[{_trial_num[0]}/{total_trials}] "
+                    f"Epoch {epoch}/{_epoch_total[0]}{tr_s}   "
+                    f"{val_label}={val_acc*100:.1f}%"
+                )
+                try:
+                    tr_str = f"  tr={train_acc*100:.1f}%" if train_acc is not None else ""
+                    print(
+                        f"\r[SEARCH] trial {_trial_num[0]}/{total_trials}  "
+                        f"epoch {epoch:>3}/{_epoch_total[0]}{tr_str}"
+                        f"   {val_label}={val_acc*100:.1f}%",
+                        flush=True
+                    )
+                except Exception:
+                    pass
+            QApplication.processEvents()
+
+        try:
+            for (epochs_v, batch_v, lr_v, neg_k_v) in all_combos:
+                _trial_num[0] += 1
+                _epoch_total[0] = epochs_v
+
+                # re-cluster negatives if K changed
+                if has_k_search and neg_k_v is not None and neg_k_v != _last_k[0]:
+                    self.lbl_status.setText(f"[K={neg_k_v}] 正在重新聚类负样本...")
+                    QApplication.processEvents()
+                    self._restore_negatives_to_free()
+                    try:
+                        from cluster_negatives import cluster_negatives as _cn
+                        _cn(data_dir=LABELED_DIR, k=neg_k_v)
+                    except Exception as _ke:
+                        print(f"[K-SEARCH] cluster failed: {_ke}", flush=True)
+                    _last_k[0] = neg_k_v
+
+                k_tag = f" K={neg_k_v}" if has_k_search else ""
+                print(
+                    f"[SEARCH] Trial {_trial_num[0]}/{total_trials}: "
+                    f"epochs={epochs_v} batch={batch_v} lr={lr_v:.6f}{k_tag}",
+                    flush=True
+                )
+                self.lbl_status.setText(
+                    f"搜索 [{_trial_num[0]}/{total_trials}]  "
+                    f"epochs={epochs_v} batch={batch_v} lr={lr_v:.6f}{k_tag}"
+                )
+                QApplication.processEvents()
+
+                clf = TorchResourceFieldClassifier()
+                acc = clf.train(
+                    data_dir=LABELED_DIR,
+                    save_path=tmp_path,
+                    epochs=epochs_v,
+                    batch_size=batch_v,
+                    lr=lr_v,
+                    model_type=tp['model_type'],
+                    lr_scheduler=tp['lr_scheduler'],
+                    pretrained=tp['pretrained'],
+                    val_split=tp['val_split'],
+                    test_split=tp['test_split'],
+                    validate_during_training=tp['validate_during_training'],
+                    use_class_weights=tp['use_class_weights'],
+                    num_workers=tp['num_workers'],
+                    pin_memory=tp['pin_memory'],
+                    persistent_workers=tp['persistent_workers'],
+                    num_conv=tp['num_conv'],
+                    base_channels=tp['base_channels'],
+                    progress_callback=progress_cb,
+                )
+                results.append((_trial_num[0], epochs_v, batch_v, lr_v, neg_k_v, acc))
+                is_best = acc > best_acc
+                print(
+                    f"[SEARCH] Trial {_trial_num[0]} result: acc={acc*100:.1f}%"
+                    f"{'  <- BEST' if is_best else ''}",
+                    flush=True
+                )
+                if is_best:
+                    best_acc = acc
+                    best_combo = (epochs_v, batch_v, lr_v, neg_k_v)
+                    best_clf = clf
+                    try:
+                        shutil.copy(tmp_path, TORCH_MODEL_PATH)
+                    except Exception as cp_ex:
+                        print(f"[SEARCH] Warning: copy failed: {cp_ex}", flush=True)
+
+            # 清理临时文件
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+
+            # 打印结果表
+            print("\n[SEARCH] ===== 搜索结果 =====", flush=True)
+            k_col = f"  {'K':>4}" if has_k_search else ""
+            print(f"{'Trial':>5}  {'Epochs':>6}  {'Batch':>5}  {'LR':>10}{k_col}  {'Acc':>7}", flush=True)
+            for (t, e, b, lr, kv, a) in sorted(results, key=lambda x: -x[5]):
+                marker = " <- best" if (e, b, lr, kv) == best_combo else ""
+                k_val = f"  {kv:>4}" if has_k_search else ""
+                print(f"{t:>5}  {e:>6}  {b:>5}  {lr:>10.6f}{k_val}  {a*100:>6.1f}%{marker}", flush=True)
+            print("[SEARCH] ====================\n", flush=True)
+
+            if best_combo:
+                k_part = f" K={best_combo[3]}" if has_k_search else ""
+                msg = (
+                    f"搜索完成 ({total_trials}次)  最优: "
+                    f"epochs={best_combo[0]} batch={best_combo[1]} lr={best_combo[2]:.6f}{k_part}  "
+                    f"acc={best_acc*100:.1f}%"
+                )
+            else:
+                msg = f"搜索完成 ({total_trials}次)  best_acc={best_acc*100:.1f}%"
+            self.progress_bar.setVisible(False)
+            self.lbl_status.setText(msg)
+            if best_clf is not None:
+                self._show_misclassified(best_clf)
+            self._show_predict_after_train(best_acc)
+        except Exception as ex:
+            self.progress_bar.setVisible(False)
+            self.lbl_status.setText(f"❌ 搜索训练失败：{ex}")
+            QMessageBox.critical(self, "搜索训练失败", str(ex))
+
+    # ── 误分类图片瀏览 ───────────────────────────────────────────────────────
+    def _show_misclassified(self, clf):
+        try:
+            items = getattr(clf, 'last_misclassified', [])
+            if not items:
+                return
+            dlg = MisclassifiedDialog(items, parent=self)
+            dlg.exec_()
+        except Exception as _ex:
+            print(f"[TRAIN] _show_misclassified error: {_ex}", flush=True)
+
+    # ── 训练完成后展示预测 ────────────────────────────────────────────────────
+    def _show_predict_after_train(self, acc):
+        try:
+            idx = next((i for i in range(len(self.image_paths)) if i not in self.labeled_set), None)
+            if idx is None and self.image_paths:
+                idx = 0
+            if idx is not None:
+                img_path = self.image_paths[idx]
+                img = cv2.imdecode(np.fromfile(img_path, dtype=np.uint8), cv2.IMREAD_COLOR)
+                if img is not None:
+                    scanner = FieldScanner()
+                    fw, fh, frame = scanner.detect_yellow_frame(img)
+                    if frame is not None:
+                        ax, ay, _, _ = frame
+                        h, w = img.shape[:2]
+                        boxes = scanner.build_grid(ax, ay, fw, fh, 0, 0, w, h)
+                        predict_boxes = [(tx, ty, tx+gw, ty+gh) for (tx, ty, gw, gh) in boxes]
+                        dlg = PredictWindow(img, predict_boxes=predict_boxes, parent=self)
+                        dlg.exec_()
+                    else:
+                        QMessageBox.information(self, "训练完成",
+                            f"训练完成：{acc*100:.1f}%\n未检测到锚点，无法展示预测。")
+                else:
+                    QMessageBox.information(self, "训练完成",
+                        f"训练完成：{acc*100:.1f}%\n无法读取样本图。")
+            else:
+                QMessageBox.information(self, "训练完成",
+                    f"训练完成：{acc*100:.1f}%\n未找到样本图片。")
+        except Exception as ex:
+            QMessageBox.information(self, "训练完成",
+                f"训练完成：{acc*100:.1f}%\n展示预测时出错：{ex}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    import io
+    # Ensure UTF-8 output on Windows consoles
+    if sys.platform == "win32":
+        try:
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    # Set Segoe UI as primary font so digits/Latin always use correct (non-CJK) glyphs.
+    # Qt automatically falls back to the system CJK font for characters not in Segoe UI,
+    # so Chinese labels still render correctly without any CSS tricks.
+    from PyQt5.QtGui import QFont
+    _base_font = QFont("Segoe UI", 9)
+    _base_font.setStyleStrategy(QFont.PreferAntialias)
+    app.setFont(_base_font)
     win = LabelerWindow()
     win.show()
     sys.exit(app.exec_())

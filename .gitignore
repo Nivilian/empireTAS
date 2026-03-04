@@ -1,10 +1,14 @@
 # Virtual environment
 empireTAS/
+src/__pycache__/
+src/label_train/__pycache__/
 
 # Image directories
 src/images/backupImages/
 src/images/trainingBackup/
 src/images/ocr/
+# src/images/labeledImages/
+src/images/debug/
 
 # Python cache
 __pycache__/

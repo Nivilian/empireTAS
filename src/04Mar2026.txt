@@ -1,0 +1,12 @@
+=== GLOBAL LIST (2 entries) ===
+  yongzhou (0.78): [0177, 26/6], clay
+  yongzhou (0.67): [0177, 37/7], clay
+=== GLOBAL LIST (8 entries) ===
+  yongzhou (1.0000): [0179, 39/5] (0.9786), boat
+  yongzhou (1.0000): [0179, 39/3] (0.9728), boat
+  yongzhou (1.0000): [0179, 38/8] (0.9639), boat
+  yongzhou (1.0000): [0179, 38/12] (0.8764), clay
+  yongzhou (1.0000): [0179, 31/3] (0.6554), clay
+  yongzhou (1.0000): [0179, 139/33] (0.9643), boat
+  yongzhou (1.0000): [0179, 39/33] (0.9830), boat
+  yongzhou (1.0000): [0179, 35/39] (0.8328), clay

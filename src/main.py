@@ -1,4 +1,4 @@
-import sys, time, os, cv2, win32gui
+import sys, time, os, cv2, win32gui, win32con, win32api
 import math
 import numpy as np
 import pygetwindow as gw
@@ -9,6 +9,7 @@ from PyQt5.QtCore import Qt, QTimer
 from vision_core import capture_game_ignore_ui, find_image_and_location, find_hwnd, imread_safe, find_all_matches
 from army_scanner import ArmyScanner
 from map_scanner import FieldScanner
+from in_civi_operation import InCiviOperation
 import json
 import glob
 
@@ -21,20 +22,33 @@ class EmpireOverlay(QWidget):
         self.main_layout = QVBoxLayout()
         self.setLayout(self.main_layout)
         
-        # English: Update label to show CPU mode for clarity
-        self.label = QLabel("TAS ACTIVE (CPU Mode)")
+        try:
+            import torch
+            _dev = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
+        except Exception:
+            _dev = "CPU"
+        self.label = QLabel(f"TAS ACTIVE ({_dev})")
         self.label.setStyleSheet("color: #00FF00; font-weight: bold; background-color: rgba(0,0,0,120); padding: 5px;")
         self.main_layout.addWidget(self.label)
 
+        self.add_control_button("Map Scan Global", self.map_scan_global)
+        # self.add_control_button("Map Scan Full", self.map_scan_full)
+        self.add_control_button("Map Scan Once", self.map_scan_once)
+        self.add_control_button("Test Field Change", self.test_field_change)
+        # self.add_control_button("Swap To Bottom Right", self.swap_to_bottom_right)
+        # self.add_control_button("Swap To Bottom", self.swap_to_bottom)
+        self.add_control_button("Test Alliance Region", self.test_alliance_region)
+        self.add_control_button("Test Location", self.test_location)
+        self.add_control_button("Save Screenshot (x)", self.save_screenshot)
         self.add_control_button("Quick Harvest", self.once_harv)
         self.add_control_button("Check Army", self.army_reader)
-        self.add_control_button("Scroll Test", self.scroll_test)
-        self.add_control_button("ROI Test", self.roi_test)
-        self.add_control_button("Capture Test", self.run_vision_test)
-        self.add_control_button("Browse Map (Predict)", self.browse_map)
-        self.add_control_button("Test Field", self.test_field)
-        self.add_control_button("Save Screenshot (x)", self.save_screenshot)
-        self.add_control_button("SHUT DOWN (esc)", self.close_app, is_danger=True)
+        # Population toggle button (click to enable/disable automatic population clicks)
+        self.btn_population = QPushButton("Population")
+        self.btn_population.setFixedHeight(28)
+        self.btn_population.setStyleSheet("background-color: rgba(50, 50, 50, 200); color: white; padding: 5px; font-weight: bold;")
+        self.btn_population.clicked.connect(self._toggle_population)
+        self.main_layout.addWidget(self.btn_population)
+        self.add_control_button("SHUT DOWN (space)", self.close_app, is_danger=True)
 
         self.target_title = "MuMu安卓" 
         self.ui_width = 360
@@ -47,10 +61,12 @@ class EmpireOverlay(QWidget):
         self.field_scanner = FieldScanner(self.target_title, grid_fw=194, grid_fh=97, threshold=0.18)
         # Calibration disabled: we will not load per-image calibration JSONs.
 
-        # English: Global ESC hotkey — works even when the overlay is not focused
-        keyboard.add_hotkey('esc', self.close_app)
+        # Global space hotkey — forces immediate exit even when scan is blocking the main thread
+        keyboard.add_hotkey('space', self.close_app)
         # Global hotkey 'x' to save screenshot quickly
         keyboard.add_hotkey('x', self.save_screenshot)
+        # In-civi operation controller
+        self.in_civi_op = InCiviOperation(self.target_title)
 
     def add_control_button(self, text, callback, is_danger=False):
         btn = QPushButton(text)
@@ -62,7 +78,9 @@ class EmpireOverlay(QWidget):
         btn.clicked.connect(callback)
         self.main_layout.addWidget(btn)
 
-    def close_app(self): QApplication.quit()
+    def close_app(self):
+        import os as _os
+        _os._exit(0)
 
     def click_multiple(self, template_name, threshold=0.7, timeout=5, roi=None):
         start_time = time.time()
@@ -322,19 +340,142 @@ class EmpireOverlay(QWidget):
         self.label.setText(f"已存到 trainingBackup/{os.path.basename(fname)}")
 
     def test_field(self):
+        # legacy kept for compatibility — dispatch to field scanner
         self.label.setText("Scanning fields...")
         results = self.field_scanner.scan(status_cb=self.label.setText)
         hits_empty    = results.get("空粘土",     [])
         hits_occupied = results.get("被占领粘土", [])
         self.label.setText(f"empty={len(hits_empty)}  occupied={len(hits_occupied)}")
 
-    def browse_map(self):
-        """Trigger map browse + prediction via FieldScanner.browse_and_predict()."""
+    def test_population(self):
+        """Show ROIs used for prefer detection and population clicking for fine-tuning."""
+        self.label.setText("Test Population: showing ROIs")
         try:
-            self.field_scanner.browse_and_predict(target_title=self.target_title, status_cb=self.label.setText)
-            self.label.setText("浏览完成 — 见 Map Predictions 窗口")
+            self.in_civi_op.test_roi()
         except Exception as ex:
-            self.label.setText(f"浏览失败：{ex}")
+            self.label.setText(f"Test Population failed: {ex}")
+
+    def _set_clickthrough(self, enable: bool):
+        """Make the overlay transparent to mouse clicks during automation."""
+        try:
+            hwnd = int(self.winId())
+            ex_style = win32api.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+            if enable:
+                win32api.SetWindowLong(hwnd, win32con.GWL_EXSTYLE,
+                                       ex_style | win32con.WS_EX_TRANSPARENT)
+            else:
+                win32api.SetWindowLong(hwnd, win32con.GWL_EXSTYLE,
+                                       ex_style & ~win32con.WS_EX_TRANSPARENT)
+        except Exception:
+            pass
+
+    def map_scan_global(self):
+        """Start a fresh global scan session: reset global_list then run map_scan_full."""
+        self._set_clickthrough(True)
+        try:
+            self.field_scanner.map_scan_global(
+                target_title=self.target_title, status_cb=self.label.setText
+            )
+        except Exception as ex:
+            self.label.setText(f"Map Scan Global 失败：{ex}")
+        finally:
+            self._set_clickthrough(False)
+
+    def test_field_change(self):
+        """Click zone ROI centre, wait 0.5 s, show calibration marker."""
+        self._set_clickthrough(True)
+        try:
+            self.field_scanner.test_field_change(
+                target_title=self.target_title, status_cb=self.label.setText
+            )
+        except Exception as ex:
+            self.label.setText(f"Test Field Change 失败：{ex}")
+        finally:
+            self._set_clickthrough(False)
+
+    def map_scan_once(self):
+        """Scan for alliance tiles, retry with swap_to_bottom_right up to 2 times."""
+        self._set_clickthrough(True)
+        try:
+            self.field_scanner.map_scan_once(
+                target_title=self.target_title, status_cb=self.label.setText
+            )
+        except Exception as ex:
+            self.label.setText(f"Map Scan Once 失败：{ex}")
+        finally:
+            self._set_clickthrough(False)
+
+    def map_scan_full(self):
+        """Full 18-step map sweep across 3 rows × 3 columns."""
+        self._set_clickthrough(True)
+        try:
+            self.field_scanner.map_scan_full(
+                target_title=self.target_title, status_cb=self.label.setText
+            )
+        except Exception as ex:
+            self.label.setText(f"Map Scan Full 失败：{ex}")
+        finally:
+            self._set_clickthrough(False)
+
+    def swap_to_left(self):
+        """Scroll map left by 8 × fw / 1.3 pixels."""
+        self._set_clickthrough(True)
+        try:
+            self.field_scanner.swap_to_left(self.target_title, status_cb=self.label.setText)
+        except Exception as ex:
+            self.label.setText(f"Swap To Left 失败：{ex}")
+        finally:
+            self._set_clickthrough(False)
+
+    def swap_to_bottom_right(self):
+        """Drag map from top-left toward bottom-right to scroll toward top-left."""
+        self._set_clickthrough(True)
+        try:
+            self.field_scanner.swap_to_bottom_right(self.target_title, status_cb=self.label.setText)
+        except Exception as ex:
+            self.label.setText(f"Swap To Bottom Right 失败：{ex}")
+        finally:
+            self._set_clickthrough(False)
+
+    def swap_to_bottom(self):
+        """Drag map downward along vertical centre line."""
+        self._set_clickthrough(True)
+        try:
+            self.field_scanner.swap_to_bottom(self.target_title, status_cb=self.label.setText)
+        except Exception as ex:
+            self.label.setText(f"Swap To Bottom 失败：{ex}")
+        finally:
+            self._set_clickthrough(False)
+
+    def test_alliance_region(self):
+        """Visualise the alliance info-panel ROI on the cropped capture."""
+        try:
+            self.field_scanner.test_alliance_region(self.target_title, status_cb=self.label.setText)
+        except Exception as ex:
+            self.label.setText(f"Test Alliance Region 失败：{ex}")
+
+    def test_location(self):
+        """Visualise and OCR zone-number + map-coordinate ROIs."""
+        try:
+            self.field_scanner.test_location(self.target_title, status_cb=self.label.setText)
+        except Exception as ex:
+            self.label.setText(f"Test Location 失败：{ex}")
+
+    def _toggle_population(self):
+        try:
+            if self.in_civi_op.is_running():
+                self.in_civi_op.stop()
+                # reset button style
+                self.btn_population.setStyleSheet("background-color: rgba(50, 50, 50, 200); color: white; padding: 5px; font-weight: bold;")
+                self.label.setText("Population automation stopped")
+            else:
+                # start with status callback to update overlay label with detected mode
+                self.in_civi_op.start(status_cb=self.label.setText)
+                # green style when active
+                self.btn_population.setStyleSheet("background-color: rgba(30, 120, 30, 220); color: white; padding: 5px; font-weight: bold;")
+                self.label.setText("Population automation started")
+        except Exception as ex:
+            self.label.setText(f"Population toggle error: {ex}")
 
     def roi_test(self):
         """Show extended ROI and all slot_topright candidates colour-coded by match score."""
