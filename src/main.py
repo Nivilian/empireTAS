@@ -31,7 +31,7 @@ class EmpireOverlay(QWidget):
         self.label.setStyleSheet("color: #00FF00; font-weight: bold; background-color: rgba(0,0,0,120); padding: 5px;")
         self.main_layout.addWidget(self.label)
 
-        self.add_control_button("Map Scan Global", self.map_scan_global)
+        self.add_control_button("Map Scan Global", lambda: self.map_scan_global(20, 300))
         # self.add_control_button("Map Scan Full", self.map_scan_full)
         self.add_control_button("Map Scan Once", self.map_scan_once)
         self.add_control_button("Test Field Change", self.test_field_change)
@@ -369,12 +369,12 @@ class EmpireOverlay(QWidget):
         except Exception:
             pass
 
-    def map_scan_global(self):
+    def map_scan_global(self, max_iterations=10, max_global_entries=300):
         """Start a fresh global scan session: reset global_list then run map_scan_full."""
         self._set_clickthrough(True)
         try:
             self.field_scanner.map_scan_global(
-                target_title=self.target_title, status_cb=self.label.setText
+                target_title=self.target_title, status_cb=self.label.setText, max_iterations=max_iterations, max_global_entries=max_global_entries
             )
         except Exception as ex:
             self.label.setText(f"Map Scan Global 失败：{ex}")
