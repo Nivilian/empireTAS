@@ -9,6 +9,7 @@ src/images/trainingBackup/
 src/images/ocr/
 # src/images/labeledImages/
 src/images/debug/
+src/resourcefield_model.pth.search_tmp.pth.acc.png
 
 # Python cache
 __pycache__/

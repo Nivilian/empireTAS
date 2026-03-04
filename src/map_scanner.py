@@ -616,10 +616,10 @@ class FieldScanner:
             time.sleep(2.0)  # wait for dismissal
 
             zone_str, coord_str = self._read_location(title)
-            result_line = f"{best_name} ({best_score:.4f}): [{zone_str}, {coord_str}]"
             coor = f"[{zone_str}, {coord_str}]"
+            result_line = f"{coor}, {best_name} ({best_score:.4f})"
             if terrain:
-                result_line = f"{result_line}, {terrain} ({terrain_conf:.4f})"
+                result_line = f"{result_line}  {terrain} ({terrain_conf:.4f})"
             # print(f"  {result_line}")
             if status_cb:
                 try: status_cb(result_line)
@@ -1053,6 +1053,8 @@ class FieldScanner:
                         onefield_list.append(result)
                         self.global_list.append(result)
                 # else: duplicate coords — skip silently
+            else:
+                time.sleep(1.0)   # no match — brief pause before next tile
         _s("done")
 
     def map_scan_full(self, target_title=None, model_path=None, torch_model_path=None,
@@ -1134,7 +1136,7 @@ class FieldScanner:
         # print(f"  [MapScanFull] done  this_sweep={len(onefield_list)}  new={added}  total={len(self.global_list)}")
 
     def map_scan_global(self, target_title=None, model_path=None, torch_model_path=None,
-                        status_cb=None):
+                        status_cb=None, max_iterations=10, max_global_entries=300):
         """Start a fresh global scan session: reset global_list, run map_scan_full,
         then print the complete accumulated list."""
         title = target_title or self.window_title
@@ -1160,13 +1162,15 @@ class FieldScanner:
                 return
             with open(_txt_path, "a", encoding="utf-8") as f:
                 if not _header_written:
-                    f.write(f"=== GLOBAL LIST ({len(self.global_list)} entries) ===\n")
+                    _cst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)
+                    _time_str = _cst.strftime("%Y-%m-%d %H:%M:%S CST")
+                    f.write(f"=== GLOBAL LIST ({len(self.global_list)} entries)  {_time_str} ===\n")
                     _header_written = True
                 for item in new_items:
                     f.write(f"  {item}\n")
 
         i = 0
-        while i < 2 and len(self.global_list) < 100:  # Example loop, replace with actual condition
+        while i < max_iterations and len(self.global_list) < max_global_entries:  # Example loop, replace with actual condition
             _prev_len = len(self.global_list)
             self.map_scan_full(target_title=title,
                                model_path=model_path,
@@ -1362,7 +1366,7 @@ class FieldScanner:
             'clay':   (40, 100, 150),
             'forest': (60, 200, 60),
             'boat':   (220, 120, 40),
-            # 'copper': (60, 60, 220),
+            'copper': (60, 60, 220),
             # 'stone':  (200, 200, 200),
         }
         _active_terrains = frozenset(terrain_to_bgr)  # only these get labels + clicks

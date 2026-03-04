@@ -1,12 +1,58 @@
-=== GLOBAL LIST (2 entries) ===
-  yongzhou (0.78): [0177, 26/6], clay
-  yongzhou (0.67): [0177, 37/7], clay
-=== GLOBAL LIST (8 entries) ===
-  yongzhou (1.0000): [0179, 39/5] (0.9786), boat
-  yongzhou (1.0000): [0179, 39/3] (0.9728), boat
-  yongzhou (1.0000): [0179, 38/8] (0.9639), boat
-  yongzhou (1.0000): [0179, 38/12] (0.8764), clay
-  yongzhou (1.0000): [0179, 31/3] (0.6554), clay
-  yongzhou (1.0000): [0179, 139/33] (0.9643), boat
-  yongzhou (1.0000): [0179, 39/33] (0.9830), boat
-  yongzhou (1.0000): [0179, 35/39] (0.8328), clay
+=== GLOBAL LIST (1 entries)  2026-03-05 03:54:35 CST ===
+  [0205, 2/4], yongzhou (1.0000)  boat (0.9179)
+=== GLOBAL LIST (1 entries)  2026-03-05 04:17:04 CST ===
+  [0207, 19/23], yongzhou (1.0000)  forest (0.5076)
+=== GLOBAL LIST (1 entries)  2026-03-05 04:29:27 CST ===
+  [0210, 24/24], rmb_wanjia (1.0000)  clay (0.8257)
+=== GLOBAL LIST (2 entries)  2026-03-05 04:33:59 CST ===
+  [0210, 6/28], rmb_wanjia (1.0000)  clay (0.5400)
+  [0210, 24/24], rmb_wanjia (1.0000)  clay (0.8376)
+  [0212, 21/13], yongzhou (1.0000)  clay (0.9833)
+  [0212, 19/37], yongzhou (1.0000)  clay (0.8535)
+  [0213, 31/33], yongzhou (1.0000)  forest (0.5800)
+  [0214, ?/?], yongzhou (1.0000)  forest (0.6466)
+  [0215, 3/37], yongzhou (1.0000)  clay (0.8356)
+=== GLOBAL LIST (1 entries)  2026-03-05 04:45:01 CST ===
+  [0217, 021/1], yongzhou (1.0000)  clay (0.9889)
+  [0218, 32/16], yongzhou (1.0000)  clay (0.9414)
+  [0219, 9/7], yongzhou (1.0000)  forest (0.9247)
+  [0219, 8/6], yongzhou (1.0000)  forest (0.7625)
+  [0219, 27/7], yongzhou (1.0000)  clay (0.9961)
+  [0219, 24/2], yongzhou (1.0000)  forest (0.8369)
+  [0219, 29/9], yongzhou (1.0000)  forest (0.6565)
+  [0219, 39/13], yongzhou (1.0000)  boat (0.9961)
+  [0219, 36/4], yongzhou (1.0000)  clay (0.8650)
+  [0219, 112/26], yongzhou (1.0000)  clay (0.9969)
+  [0219, 11/17], yongzhou (1.0000)  forest (0.9065)
+  [0219, 1/19], yongzhou (1.0000)  clay (0.8418)
+  [0219, 514/28], yongzhou (1.0000)  clay (0.9971)
+  [0219, 522/212], yongzhou (1.0000)  clay (0.9934)
+  [0219, 523/19], yongzhou (1.0000)  clay (0.9927)
+  [0219, 517/29], yongzhou (1.0000)  forest (0.7453)
+  [0219, 25/19], yongzhou (1.0000)  forest (0.5681)
+  [0219, 18/32], yongzhou (1.0000)  forest (0.5015)
+  [0219, 39/25], yongzhou (1.0000)  clay (0.9941)
+  [0219, 32/22], yongzhou (1.0000)  forest (0.9127)
+  [0219, 33/19], yongzhou (1.0000)  forest (0.4883)
+  [0219, 9/35], yongzhou (1.0000)  clay (0.9403)
+  [0219, 14/28], yongzhou (1.0000)  clay (0.7224)
+  [0219, 20/38], yongzhou (1.0000)  forest (0.7097)
+  [0219, 36/38], yongzhou (1.0000)  forest (0.8403)
+  [0220, 36/36], yongzhou (1.0000)  boat (0.9972)
+  [0222, 33/1], yongzhou (1.0000)  clay (0.4936)
+  [0222, 10/30], yongzhou (1.0000)  clay (0.6182)
+  [0222, 39/35], yongzhou (1.0000)  boat (0.9948)
+  [0224, 12/4], yongzhou (1.0000)  copper (0.6804)
+  [0224, 11/3], yongzhou (1.0000)  forest (0.5078)
+  [0227, 23/3], yongzhou (1.0000)  clay (0.9861)
+  [0227, 21/11], yongzhou (1.0000)  clay (0.9823)
+  [0227, 29/9], yongzhou (1.0000)  forest (0.8216)
+  [0227, 18/4], yongzhou (1.0000)  forest (0.6218)
+  [0227, ?/?], yongzhou (1.0000)  clay (0.9962)
+  [0227, 10/30], yongzhou (1.0000)  clay (0.9939)
+  [0227, 6/26], yongzhou (1.0000)  forest (0.5304)
+  [0227, 19/29], yongzhou (1.0000)  forest (0.6970)
+  [0227, 33/37], yongzhou (1.0000)  clay (0.9303)
+  [0228, 10/4], yongzhou (1.0000)  clay (0.9947)
+  [0228, 39/23], buliangren (1.0000)  boat (0.9950)
+  [0230, 38/32], yongzhou (1.0000)  boat (0.9912)

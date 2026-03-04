@@ -31,7 +31,7 @@ class EmpireOverlay(QWidget):
         self.label.setStyleSheet("color: #00FF00; font-weight: bold; background-color: rgba(0,0,0,120); padding: 5px;")
         self.main_layout.addWidget(self.label)
 
-        self.add_control_button("Map Scan Global", lambda: self.map_scan_global(20, 300))
+        self.add_control_button("Map Scan Global", lambda: self.map_scan_global(50, 500))
         # self.add_control_button("Map Scan Full", self.map_scan_full)
         self.add_control_button("Map Scan Once", self.map_scan_once)
         self.add_control_button("Test Field Change", self.test_field_change)
